@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import "./App.css"
 import { ShogiBoard } from "./components/ShogiBoard"
+import { GameResultModal } from "./components/GameResultModal"
 import type { AnalysisTarget } from "./core/analysis/AnalysisTarget"
 import { analyzeCandidateMoves } from "./core/analysis/analyzeCandidateMoves"
 import { buildAnalysisPrompt } from "./core/analysis/buildAnalysisPrompt"
@@ -14,9 +15,9 @@ import { BoardFactory } from "./core/board/BoardFactory"
 import type { Board } from "./core/board/Board"
 import type { Move } from "./core/board/Move"
 import { AttackDetector } from "./core/rules/AttackDetector"
+import { MoveApplier } from "./core/rules/MoveApplier"
 import { MoveGenerator } from "./core/rules/MoveGenerator"
 import { isPerpetualCheckSennichite } from "./core/rules/perpetualCheck"
-import { GameResultModal } from "./components/GameResultModal"
 import { serializeBoard } from "./core/utils/boardSerializer"
 
 type ReviewTab = "mainline" | "variation"
@@ -118,17 +119,21 @@ function App() {
   // 右パネルのタブ
   const [sideTab, setSideTab] = useState<SideTab>("kifu")
 
+  // 候補手選択
+  const [selectedCandidateIndex, setSelectedCandidateIndex] = useState<number | null>(null)
+
   // ルール関連クラスは使い回す
   const generator = useMemo(() => new MoveGenerator(), [])
   const attackDetector = useMemo(() => new AttackDetector(), [])
+  const moveApplier = useMemo(() => new MoveApplier(), [])
 
   // 棋譜リストの自動スクロール用
   const activeMoveRef = useRef<HTMLButtonElement | null>(null)
 
+  // AI解説表示用
   const [analysisResult, setAnalysisResult] = useState("")
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [analysisError, setAnalysisError] = useState("")
-  const [selectedCandidateIndex, setSelectedCandidateIndex] = useState<number | null>(null)
 
   // =========================
   // 通常対局の終局判定
@@ -218,19 +223,21 @@ function App() {
   // =========================
 
   const displayBoard = useMemo(() => {
-    // 通常対局中は対局盤面を表示
     if (!isReviewMode) {
       return board
     }
 
-    // 感想戦の本譜閲覧中は、本譜履歴の指定局面を表示
     if (reviewTab === "mainline") {
       return boardHistory[reviewMoveIndex] ?? board
     }
 
-    // 感想戦の局面編集中は、編集用盤面を表示
     return variationBoard ?? boardHistory[reviewMoveIndex] ?? board
   }, [isReviewMode, reviewTab, board, boardHistory, reviewMoveIndex, variationBoard])
+
+  // 解析用の合法手は、表示中盤面ベースで作る
+  const analysisLegalMoves = useMemo(() => {
+    return generator.generateLegalMoves(displayBoard)
+  }, [displayBoard, generator])
 
   // 現在表示中の局面を、解析対象としてまとめる
   const currentAnalysisTarget: AnalysisTarget = useMemo(() => {
@@ -268,95 +275,114 @@ function App() {
 
   // 現在局面の候補手を評価順に並べる
   const currentCandidateMoves = useMemo(() => {
-    return analyzeCandidateMoves(displayBoard, legalMoves)
-  }, [displayBoard, legalMoves])
+    return analyzeCandidateMoves(displayBoard, analysisLegalMoves)
+  }, [displayBoard, analysisLegalMoves])
 
-  const currentMoveComparison = useMemo(() => {
-    return compareWithBestMove(
-      currentMoveAnalysisContext,
-      currentCandidateMoves
-    )
-  }, [currentMoveAnalysisContext, currentCandidateMoves])
-
-  const targetMoveContext = useMemo(() => {
-    if (selectedCandidateIndex === null) {
-      return currentMoveAnalysisContext
-    }
-
-    const candidate = currentCandidateMoves[selectedCandidateIndex]
-
-    // 👇 ここが重要：仮想的にその手を適用した context を作る
-    return createMoveAnalysisContext({
-      ...currentAnalysisTarget,
-      move: candidate.move,
-    })
-  }, [selectedCandidateIndex, currentMoveAnalysisContext, currentCandidateMoves, currentAnalysisTarget])
-
-  // ChatGPTに渡すための完全入力
-  const fullAiInput: FullAiInput = useMemo(() => {
-    return buildFullAiInput(
-      targetMoveContext,
-      currentCandidateMoves,
-      currentMoveComparison,
-      displayBoard
-    )
-  }, [targetMoveContext, currentCandidateMoves, currentMoveComparison, displayBoard])
-
-  // ChatGPT に渡す解析プロンプト
-  const analysisPrompt = useMemo(() => {
-    return buildAnalysisPrompt(fullAiInput)
-  }, [fullAiInput])
-
+  // 候補手選択時の仮想局面
   const analysisBoard = useMemo(() => {
     if (selectedCandidateIndex === null) {
       return displayBoard
     }
 
     const candidate = currentCandidateMoves[selectedCandidateIndex]
+    if (!candidate) {
+      return displayBoard
+    }
 
-    const nextBoard = displayBoard.clone()
-    nextBoard.applyMove(candidate.move)
+    return moveApplier.apply(displayBoard, candidate.move)
+  }, [selectedCandidateIndex, currentCandidateMoves, displayBoard, moveApplier])
 
-    return nextBoard
-  }, [selectedCandidateIndex, displayBoard, currentCandidateMoves])
+  // 候補手選択時は、その手を1手進めた解析対象を作る
+  const selectedAnalysisTarget: AnalysisTarget = useMemo(() => {
+    if (selectedCandidateIndex === null) {
+      return currentAnalysisTarget
+    }
+
+    const candidate = currentCandidateMoves[selectedCandidateIndex]
+    if (!candidate) {
+      return currentAnalysisTarget
+    }
+
+    return {
+      lineType: currentAnalysisTarget.lineType,
+      moveIndex: currentAnalysisTarget.moveIndex + 1,
+      move: candidate.move,
+      beforeBoard: displayBoard,
+      currentBoard: analysisBoard,
+    }
+  }, [
+    selectedCandidateIndex,
+    currentCandidateMoves,
+    currentAnalysisTarget,
+    displayBoard,
+    analysisBoard,
+  ])
+
+  const targetMoveAnalysisContext: MoveAnalysisContext | null = useMemo(() => {
+    return createMoveAnalysisContext(selectedAnalysisTarget)
+  }, [selectedAnalysisTarget])
+
+  const targetMoveComparison = useMemo(() => {
+    return compareWithBestMove(
+      targetMoveAnalysisContext,
+      currentCandidateMoves
+    )
+  }, [targetMoveAnalysisContext, currentCandidateMoves])
+
+  // ChatGPTに渡すための完全入力
+  const fullAiInput: FullAiInput = useMemo(() => {
+    return buildFullAiInput(
+      targetMoveAnalysisContext,
+      currentCandidateMoves,
+      targetMoveComparison,
+      analysisBoard
+    )
+  }, [
+    targetMoveAnalysisContext,
+    currentCandidateMoves,
+    targetMoveComparison,
+    analysisBoard,
+  ])
+
+  // ChatGPT に渡す解析プロンプト
+  const analysisPrompt = useMemo(() => {
+    return buildAnalysisPrompt(fullAiInput)
+  }, [fullAiInput])
 
   const displayLastMove = useMemo(() => {
-    // 通常対局中は本譜の最終手を使う
     if (!isReviewMode) {
       return lastMove
     }
 
-    // 感想戦の本譜閲覧中は、本譜の現在局面に対応する最終手を使う
     if (reviewTab === "mainline") {
       return moveHistory[reviewMoveIndex - 1] ?? null
     }
 
-    // 感想戦の局面編集中は、変化手順の最終手を使う
     return variationLastMove
   }, [isReviewMode, reviewTab, lastMove, moveHistory, reviewMoveIndex, variationLastMove])
 
   const isBoardDisabled = useMemo(() => {
-    // 通常対局中は終局時のみ操作不可
     if (!isReviewMode) {
       return isGameOver
     }
 
-    // 感想戦の本譜閲覧中は操作不可
     if (reviewTab === "mainline") {
       return true
     }
 
-    // 感想戦の局面編集中は自由に操作可能
     return false
   }, [isReviewMode, reviewTab, isGameOver])
+
+  // 局面が変わったら候補手選択を解除
+  useEffect(() => {
+    setSelectedCandidateIndex(null)
+  }, [currentMoveIndex, reviewMoveIndex, variationMoveIndex, reviewTab, isReviewMode])
 
   // =========================
   // 通常対局用ハンドラ
   // =========================
 
-  // 本譜の盤面更新
   const handleChangeBoard = (nextBoard: Board) => {
-    // 今指した手が王手だったか
     const isCheckMove = attackDetector.isKingInCheck(nextBoard, nextBoard.getTurn())
 
     setBoard(nextBoard)
@@ -371,7 +397,6 @@ function App() {
       return [...trimmed, serializeBoard(nextBoard)]
     })
 
-    // 王手履歴も同じように管理する
     setMoveChecks(prev => {
       const trimmed = prev.slice(0, currentMoveIndex)
       return [...trimmed, isCheckMove]
@@ -380,7 +405,6 @@ function App() {
     setCurrentMoveIndex(prev => prev + 1)
   }
 
-  // 本譜の指し手更新
   const handleMoveApplied = (move: Move) => {
     setLastMove(move)
 
@@ -390,7 +414,6 @@ function App() {
     })
   }
 
-  // 待った：本譜を1手戻して、未来の履歴も削除する
   const handleTakeBack = () => {
     if (currentMoveIndex === 0) return
 
@@ -548,7 +571,7 @@ function App() {
     return `${index + 1}: ${turn}${destination}${pieceLabel}${fromLabel}`
   }
 
-    // 候補手表示用の簡易ラベル
+  // 候補手表示用の簡易ラベル
   const getCandidateMoveLabel = (move: Move) => {
     const destination = formatPosition(move.to)
     let pieceLabel = PIECE_LABELS[move.piece]
@@ -649,6 +672,7 @@ function App() {
     setAnalysisResult("")
     setAnalysisError("")
     setIsAnalyzing(false)
+    setSelectedCandidateIndex(null)
   }
 
   // =========================
@@ -750,14 +774,12 @@ function App() {
             {/* 棋譜タブ */}
             {sideTab === "kifu" && (
               <>
-                {/* パネル見出し */}
                 <div style={{ fontWeight: "bold", fontSize: 18 }}>
                   {!isReviewMode && "対局中"}
                   {isReviewMode && reviewTab === "mainline" && "感想戦 / 本譜"}
                   {isReviewMode && reviewTab === "variation" && "感想戦 / 局面編集"}
                 </div>
 
-                {/* 棋譜リスト本体 */}
                 <div
                   style={{
                     flex: 1,
@@ -888,7 +910,6 @@ function App() {
                   )}
                 </div>
 
-                {/* スライダー */}
                 <div style={{ minHeight: 40, display: "flex", alignItems: "center" }}>
                   {isReviewMode && reviewTab === "mainline" && (
                     <input
@@ -913,7 +934,6 @@ function App() {
                   )}
                 </div>
 
-                {/* 棋譜前後移動ボタン */}
                 <div
                   style={{
                     minHeight: 40,
@@ -943,7 +963,6 @@ function App() {
                   )}
                 </div>
 
-                {/* 下段操作ボタン */}
                 <div
                   style={{
                     minHeight: 40,
@@ -979,7 +998,6 @@ function App() {
                   )}
                 </div>
 
-                {/* 補足情報 */}
                 <div
                   style={{
                     fontSize: 13,
@@ -1042,13 +1060,14 @@ function App() {
                     )
                   })}
 
-                  {/* 現在の手に戻る */}
                   <button
                     onClick={() => setSelectedCandidateIndex(null)}
                     style={{
                       padding: "6px 10px",
                       borderRadius: 6,
                       border: selectedCandidateIndex === null ? "2px solid #81c784" : "1px solid #666",
+                      background: selectedCandidateIndex === null ? "rgba(129,199,132,0.2)" : "transparent",
+                      cursor: "pointer",
                     }}
                   >
                     現在の手
