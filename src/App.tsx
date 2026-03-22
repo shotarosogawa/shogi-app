@@ -17,6 +17,8 @@ import type { MoveAnalysisContext } from "./core/analysis/MoveAnalysisContext"
 import { BoardFactory } from "./core/board/BoardFactory"
 import type { Board } from "./core/board/Board"
 import type { Move } from "./core/board/Move"
+import { buildPositionRecords } from "./core/history/buildPositionRecords"
+import { sampleGameData } from "./core/history/sampleGameData"
 import { AttackDetector } from "./core/rules/AttackDetector"
 import { MoveApplier } from "./core/rules/MoveApplier"
 import { MoveGenerator } from "./core/rules/MoveGenerator"
@@ -334,6 +336,9 @@ function App() {
   const openingInfo = useMemo(() => detectOpening(displayBoard), [displayBoard])
   const castleInfo = useMemo(() => detectCastle(displayBoard), [displayBoard])
   const positionFeatures = useMemo(() => extractPositionFeatures(displayBoard), [displayBoard])
+  const positionRecords = useMemo(() => {
+    return buildPositionRecords(sampleGameData)
+  }, [])
 
   // ChatGPTに渡すための完全入力
   const fullAiInput: FullAiInput = useMemo(() => {
@@ -344,13 +349,17 @@ function App() {
       analysisBoard,
       openingInfo,
       castleInfo,
-      positionFeatures
+      positionFeatures,
+      positionRecords
     )
   }, [
     targetMoveAnalysisContext,
     currentCandidateMoves,
     targetMoveComparison,
     analysisBoard,
+    openingInfo,
+    castleInfo,
+    positionFeatures,
   ])
 
   // ChatGPT に渡す解析プロンプト

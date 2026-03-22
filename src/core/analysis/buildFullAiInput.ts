@@ -1,12 +1,19 @@
+// src/core/analysis/buildFullAiInput.ts
+
 import type { Board } from "../board/Board"
 import type { Move } from "../board/Move"
 import type { PieceType, Player } from "../board/Piece"
+import { serializeBoard } from "../utils/boardSerializer"
 import type { MoveAnalysisContext } from "./MoveAnalysisContext"
 import type { CandidateMoveAnalysis } from "./analyzeCandidateMoves"
 import type { MoveComparison } from "./compareWithBestMove"
-import type { CastleInfo } from "./detectCastle"
 import type { OpeningInfo } from "./detectOpening"
+import type { CastleInfo } from "./detectCastle"
 import type { PositionFeatures } from "./extractPositionFeatures"
+
+// 追加
+import type { PositionRecord } from "../history/PositionRecord"
+import { findSimilarPositions } from "../history/findSimilarPositions"
 
 type AiSquare = {
   x: number
@@ -38,7 +45,9 @@ type AiBoardState = {
 export type FullAiInput = {
   moveIndex: number
   lineType: "mainline" | "variation"
+
   move: AiMoveState | null
+
   moveContext: {
     player: Player
     isDrop: boolean
@@ -46,21 +55,35 @@ export type FullAiInput = {
     capturedPieceType: PieceType | null
     givesCheck: boolean
   } | null
+
   beforeBoard: AiBoardState | null
   afterBoard: AiBoardState
+
   evaluation: {
     current: number
     best: number
     diff: number
     isBestMove: boolean
   } | null
+
   candidates: Array<{
     move: AiMoveState
     score: number
   }>
+
   openingInfo: OpeningInfo
   castleInfo: CastleInfo
   positionFeatures: PositionFeatures
+
+  // 追加
+  historicalContext: {
+    matchedCount: number
+    popularMoves: Array<{
+      moveText: string
+      count: number
+      movePlayerWinRate: number
+    }>
+  } | null
 }
 
 /**
@@ -116,9 +139,6 @@ const moveToAiMove = (move: Move): AiMoveState => {
 
 /**
  * ChatGPTに渡すための完全入力を構築する
- *
- * まずは「重くても正確」を優先し、
- * before/after の全駒配置を含める
  */
 export const buildFullAiInput = (
   ctx: MoveAnalysisContext | null,
@@ -127,12 +147,24 @@ export const buildFullAiInput = (
   currentBoard: Board,
   openingInfo: OpeningInfo,
   castleInfo: CastleInfo,
-  positionFeatures: PositionFeatures
+  positionFeatures: PositionFeatures,
+  positionRecords: PositionRecord[] = []
 ): FullAiInput => {
+  // 解析対象がある場合は「その手を指す前の局面」を履歴検索に使う
+  const targetBoard = ctx ? ctx.beforeBoard : currentBoard
+  const positionKey = serializeBoard(targetBoard)
+
+  const historicalContext =
+    positionRecords.length > 0
+      ? findSimilarPositions(positionKey, positionRecords, 5)
+      : null
+
   return {
     moveIndex: ctx?.moveIndex ?? 0,
     lineType: ctx?.lineType ?? "mainline",
+
     move: ctx ? moveToAiMove(ctx.move) : null,
+
     moveContext: ctx
       ? {
           player: ctx.player,
@@ -142,8 +174,10 @@ export const buildFullAiInput = (
           givesCheck: ctx.givesCheck,
         }
       : null,
+
     beforeBoard: ctx ? dumpBoard(ctx.beforeBoard) : null,
     afterBoard: dumpBoard(ctx ? ctx.afterBoard : currentBoard),
+
     evaluation: comparison
       ? {
           current: comparison.currentScore,
@@ -152,12 +186,15 @@ export const buildFullAiInput = (
           isBestMove: comparison.isBestMove,
         }
       : null,
+
     candidates: candidates.slice(0, 5).map(item => ({
       move: moveToAiMove(item.move),
       score: item.score,
     })),
+
     openingInfo,
     castleInfo,
     positionFeatures,
+    historicalContext,
   }
 }
