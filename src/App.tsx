@@ -22,6 +22,7 @@ import { serializeBoard } from "./core/utils/boardSerializer"
 
 type ReviewTab = "mainline" | "variation"
 type SideTab = "kifu" | "analysis"
+type FollowupMode = "none" | "why" | "best" | "other" | "chat"
 
 function App() {
   // 初期局面は初回だけ生成する
@@ -131,9 +132,12 @@ function App() {
   const activeMoveRef = useRef<HTMLButtonElement | null>(null)
 
   // AI解説表示用
-  const [analysisResult, setAnalysisResult] = useState("")
+  const [analysisLogs, setAnalysisLogs] = useState<string[]>([])
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [analysisError, setAnalysisError] = useState("")
+  const [followupMode, setFollowupMode] = useState<"none" | "why" | "best" | "other" | "chat">("none")
+  // チャット
+  const [chatInput, setChatInput] = useState("")
 
   // =========================
   // 通常対局の終局判定
@@ -268,11 +272,6 @@ function App() {
     variationMoveHistory,
   ])
 
-  // 現在表示中の1手を、説明しやすい形へ変換する
-  const currentMoveAnalysisContext: MoveAnalysisContext | null = useMemo(() => {
-    return createMoveAnalysisContext(currentAnalysisTarget)
-  }, [currentAnalysisTarget])
-
   // 現在局面の候補手を評価順に並べる
   const currentCandidateMoves = useMemo(() => {
     return analyzeCandidateMoves(displayBoard, analysisLegalMoves)
@@ -346,8 +345,8 @@ function App() {
 
   // ChatGPT に渡す解析プロンプト
   const analysisPrompt = useMemo(() => {
-    return buildAnalysisPrompt(fullAiInput)
-  }, [fullAiInput])
+    return buildAnalysisPrompt(fullAiInput, followupMode)
+  }, [fullAiInput, followupMode])
 
   const displayLastMove = useMemo(() => {
     if (!isReviewMode) {
@@ -611,12 +610,41 @@ function App() {
     }
   }, [isReviewMode, reviewTab, currentMoveIndex, reviewMoveIndex, variationMoveIndex, sideTab])
 
-  const handleAnalyzeWithAi = async () => {
+  const buildConversationHistory = (logs: string[]) => {
+    return logs
+      .map(log => {
+        if (log.startsWith("👤 ")) {
+          return `ユーザー: ${log.replace("👤 ", "")}`
+        }
+        return `AI: ${log}`
+      })
+      .join("\n")
+  }
+
+  const handleAnalyzeWithAi = async (
+    mode: FollowupMode = "none",
+    userQuestion: string = "",
+    historyOverride?: string[]
+  ) => {
     try {
+      setFollowupMode(mode)
       setSideTab("analysis")
       setIsAnalyzing(true)
       setAnalysisError("")
-      setAnalysisResult("")
+
+      if (mode === "none" && !userQuestion) {
+        setAnalysisLogs([])
+      }
+
+      const historySource = historyOverride ?? analysisLogs
+      const conversationHistory = buildConversationHistory(historySource)
+
+      const prompt = buildAnalysisPrompt(
+        fullAiInput,
+        mode,
+        conversationHistory,
+        userQuestion
+      )
 
       const response = await fetch("http://localhost:3001/api/analyze-shogi", {
         method: "POST",
@@ -624,7 +652,7 @@ function App() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          prompt: analysisPrompt,
+          prompt,
         }),
       })
 
@@ -633,13 +661,34 @@ function App() {
       }
 
       const data: { text?: string } = await response.json()
-      setAnalysisResult(data.text ?? "")
+
+      setAnalysisLogs(prev => [
+        ...prev,
+        data.text ?? "",
+      ])
     } catch (error) {
       console.error(error)
       setAnalysisError("AI解析に失敗しました")
     } finally {
       setIsAnalyzing(false)
     }
+  }
+
+  const handleFollowup = async (mode: FollowupMode) => {
+    await handleAnalyzeWithAi(mode)
+  }
+
+  const handleSendMessage = async () => {
+    const text = chatInput.trim()
+    if (!text) return
+
+    const mode = "chat"
+    const nextLogs = [...analysisLogs, `👤 ${text}`]
+
+    setAnalysisLogs(nextLogs)
+    setChatInput("")
+
+    await handleAnalyzeWithAi(mode, text, nextLogs)
   }
 
   // =========================
@@ -669,7 +718,7 @@ function App() {
     setAnimatingMove(null)
     setShowResultModal(false)
     setSideTab("kifu")
-    setAnalysisResult("")
+    setAnalysisLogs([])
     setAnalysisError("")
     setIsAnalyzing(false)
     setSelectedCandidateIndex(null)
@@ -1075,7 +1124,7 @@ function App() {
                 </div>
 
                 <div style={{ marginTop: 4, display: "flex", justifyContent: "center" }}>
-                  <button onClick={handleAnalyzeWithAi} disabled={isAnalyzing}>
+                  <button onClick={() => handleFollowup("none")} disabled={isAnalyzing}>
                     {isAnalyzing ? "解析中..." : "AIで解説"}
                   </button>
                 </div>
@@ -1086,7 +1135,7 @@ function App() {
                   </div>
                 )}
 
-                {!analysisError && !analysisResult && !isAnalyzing && (
+                {!analysisError && !analysisLogs && !isAnalyzing && (
                   <div style={{ opacity: 0.7, lineHeight: 1.8 }}>
                     棋譜タブで局面を選んでから「AIで解説」を押すと、ここに解説が表示されます。
                   </div>
@@ -1098,34 +1147,92 @@ function App() {
                   </div>
                 )}
 
-                {!!analysisResult && (
-                  <div
-                    style={{
-                      flex: 1,
-                      minHeight: 0,
-                      overflowY: "auto",
-                      paddingRight: 4,
-                      lineHeight: 1.8,
-                      fontSize: 14,
-                    }}
-                  >
-                    {analysisResult.split("\n").map((line, i) => {
-                      const isHeader = line.startsWith("【")
+                <div style={{ flex: 1, overflowY: "auto" }}>
+                  {analysisLogs.map((log, idx) => {
+                    const isUser = log.startsWith("👤")
 
-                      return (
+                    return (
+                      <div
+                        key={idx}
+                        style={{
+                          textAlign: isUser ? "right" : "left",
+                          marginBottom: 8,
+                        }}
+                      >
                         <div
-                          key={i}
                           style={{
-                            fontWeight: isHeader ? "bold" : "normal",
-                            marginTop: isHeader ? 12 : 4,
+                            display: "inline-block",
+                            padding: "8px 12px",
+                            borderRadius: 12,
+                            background: isUser ? "#1976d2" : "#333",
+                            color: "#fff",
+                            maxWidth: "90%",
+                            whiteSpace: "pre-wrap",
                           }}
                         >
-                          {line}
+                          {log.replace("👤 ", "")}
                         </div>
-                      )
-                    })}
-                  </div>
-                )}
+                      </div>
+                    )
+                  })}
+                </div>
+                
+                <div
+                  style={{
+                    display: "flex",
+                    gap: 8,
+                    marginTop: 8,
+                  }}
+                >
+                  <input
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    placeholder="例：なんでこの手悪い？"
+                    style={{
+                      flex: 1,
+                      padding: "8px",
+                      borderRadius: 6,
+                      border: "1px solid #666",
+                      background: "#222",
+                      color: "#fff",
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        handleSendMessage()
+                      }
+                    }}
+                  />
+
+                  <button
+                    onClick={handleSendMessage}
+                    disabled={isAnalyzing}
+                    style={{
+                      padding: "8px 12px",
+                      borderRadius: 6,
+                      background: "#1976d2",
+                      color: "#fff",
+                      border: "none",
+                      cursor: "pointer",
+                    }}
+                  >
+                    送信
+                  </button>
+                </div>
+
+                {/* 👇 ここに追加 */}
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={() => handleFollowup("why")}>
+                    なぜ？
+                  </button>
+
+                  <button onClick={() => handleFollowup("best")}>
+                    最善手
+                  </button>
+
+                  <button onClick={() => handleFollowup("other")}>
+                    他の手
+                  </button>
+                </div>
               </>
             )}
           </div>
