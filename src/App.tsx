@@ -10,6 +10,9 @@ import type { FullAiInput } from "./core/analysis/buildFullAiInput"
 import { compareWithBestMove } from "./core/analysis/compareWithBestMove"
 import { createAnalysisTarget } from "./core/analysis/createAnalysisTarget"
 import { createMoveAnalysisContext } from "./core/analysis/createMoveAnalysisContext"
+import { detectCastle } from "./core/analysis/detectCastle"
+import { detectOpening } from "./core/analysis/detectOpening"
+import { extractPositionFeatures } from "./core/analysis/extractPositionFeatures"
 import type { MoveAnalysisContext } from "./core/analysis/MoveAnalysisContext"
 import { BoardFactory } from "./core/board/BoardFactory"
 import type { Board } from "./core/board/Board"
@@ -328,13 +331,20 @@ function App() {
     )
   }, [targetMoveAnalysisContext, currentCandidateMoves])
 
+  const openingInfo = useMemo(() => detectOpening(displayBoard), [displayBoard])
+  const castleInfo = useMemo(() => detectCastle(displayBoard), [displayBoard])
+  const positionFeatures = useMemo(() => extractPositionFeatures(displayBoard), [displayBoard])
+
   // ChatGPTに渡すための完全入力
   const fullAiInput: FullAiInput = useMemo(() => {
     return buildFullAiInput(
       targetMoveAnalysisContext,
       currentCandidateMoves,
       targetMoveComparison,
-      analysisBoard
+      analysisBoard,
+      openingInfo,
+      castleInfo,
+      positionFeatures
     )
   }, [
     targetMoveAnalysisContext,

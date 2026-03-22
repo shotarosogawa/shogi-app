@@ -4,6 +4,9 @@ import type { PieceType, Player } from "../board/Piece"
 import type { MoveAnalysisContext } from "./MoveAnalysisContext"
 import type { CandidateMoveAnalysis } from "./analyzeCandidateMoves"
 import type { MoveComparison } from "./compareWithBestMove"
+import type { CastleInfo } from "./detectCastle"
+import type { OpeningInfo } from "./detectOpening"
+import type { PositionFeatures } from "./extractPositionFeatures"
 
 type AiSquare = {
   x: number
@@ -55,6 +58,9 @@ export type FullAiInput = {
     move: AiMoveState
     score: number
   }>
+  openingInfo: OpeningInfo
+  castleInfo: CastleInfo
+  positionFeatures: PositionFeatures
 }
 
 /**
@@ -118,7 +124,10 @@ export const buildFullAiInput = (
   ctx: MoveAnalysisContext | null,
   candidates: CandidateMoveAnalysis[],
   comparison: MoveComparison | null,
-  currentBoard: Board
+  currentBoard: Board,
+  openingInfo: OpeningInfo,
+  castleInfo: CastleInfo,
+  positionFeatures: PositionFeatures
 ): FullAiInput => {
   return {
     moveIndex: ctx?.moveIndex ?? 0,
@@ -147,5 +156,8 @@ export const buildFullAiInput = (
       move: moveToAiMove(item.move),
       score: item.score,
     })),
+    openingInfo,
+    castleInfo,
+    positionFeatures,
   }
 }

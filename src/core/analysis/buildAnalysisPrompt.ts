@@ -21,6 +21,10 @@ export function buildAnalysisPrompt(
 ・専門用語は最小限
 ・明確な情報（王手など）は説明しない
 ・与えられた局面情報だけを根拠にする
+・「なぜ良いか」は局面の変化（攻め・守り・駒の働き）で説明する
+・序盤なら予想される戦型を添える
+・戦型情報や囲い情報がある場合は、その手が形作りにどう関係するかを説明してよい
+・ただし、confidence が低い囲いは断定しすぎない
 ・会話履歴がある場合は、その流れを踏まえて答える
 ・ただし、局面根拠のない断定はしない
 
@@ -31,7 +35,7 @@ ${followupMode}
 - none：
   必ず4行で出力
   ① 評価：良い / 普通 / 悪い
-  ② 一言：この手の狙い(序盤なら予想される戦型)
+  ② 一言：この手の狙い
   ③ 理由：なぜ良い/悪いか
   ④ 比較：最善手との差
 
@@ -61,5 +65,14 @@ ${userQuestion || "なし"}
 
 【局面データ】
 ${JSON.stringify(input, null, 2)}
+
+【戦型情報】
+${JSON.stringify(input.openingInfo)}
+
+【囲い情報】
+${JSON.stringify(input.castleInfo)}
+
+【局面特徴】
+${JSON.stringify(input.positionFeatures)}
 `.trim()
 }
