@@ -19,6 +19,7 @@ import type { Board } from "./core/board/Board"
 import type { Move } from "./core/board/Move"
 import { buildPositionRecords } from "./core/history/buildPositionRecords"
 import { sampleGameData } from "./core/history/sampleGameData"
+import { sampleGameList } from "./core/history/sampleGameList"
 import { AttackDetector } from "./core/rules/AttackDetector"
 import { MoveApplier } from "./core/rules/MoveApplier"
 import { MoveGenerator } from "./core/rules/MoveGenerator"
@@ -336,8 +337,11 @@ function App() {
   const openingInfo = useMemo(() => detectOpening(displayBoard), [displayBoard])
   const castleInfo = useMemo(() => detectCastle(displayBoard), [displayBoard])
   const positionFeatures = useMemo(() => extractPositionFeatures(displayBoard), [displayBoard])
+  // const positionRecords = useMemo(() => {
+  //   return buildPositionRecords(sampleGameData)
+  // }, [])
   const positionRecords = useMemo(() => {
-    return buildPositionRecords(sampleGameData)
+    return sampleGameList.flatMap(game => buildPositionRecords(game))
   }, [])
 
   // ChatGPTに渡すための完全入力

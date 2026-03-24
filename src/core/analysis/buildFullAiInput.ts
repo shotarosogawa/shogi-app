@@ -75,7 +75,6 @@ export type FullAiInput = {
   castleInfo: CastleInfo
   positionFeatures: PositionFeatures
 
-  // 追加
   historicalContext: {
     matchedCount: number
     popularMoves: Array<{
@@ -83,6 +82,7 @@ export type FullAiInput = {
       count: number
       movePlayerWinRate: number
     }>
+    topMoveShare: number
   } | null
 }
 
@@ -153,6 +153,14 @@ export const buildFullAiInput = (
   // 解析対象がある場合は「その手を指す前の局面」を履歴検索に使う
   const targetBoard = ctx ? ctx.beforeBoard : currentBoard
   const positionKey = serializeBoard(targetBoard)
+
+  // 👇 デバッグログ追加
+  if (positionRecords.length > 0) {
+    console.log("===== position debug =====")
+    console.log("current key:", positionKey)
+    console.log("sample key:", positionRecords[0].positionKey)
+    console.log("records length:", positionRecords.length)
+  }
 
   const historicalContext =
     positionRecords.length > 0

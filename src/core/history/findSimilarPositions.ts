@@ -19,6 +19,7 @@ export type PopularMoveStat = {
 export type SimilarPositionResult = {
   matchedCount: number
   popularMoves: PopularMoveStat[]
+  topMoveShare: number
 }
 
 /**
@@ -28,51 +29,66 @@ export type SimilarPositionResult = {
 export const findSimilarPositions = (
   positionKey: string,
   records: PositionRecord[],
-  limit = 5
+  limit: number = 5
 ): SimilarPositionResult => {
-  const matched = records.filter(record => record.positionKey === positionKey)
+  const matched = records.filter(r => r.positionKey === positionKey)
+  const matchedCount = matched.length
 
-  if (matched.length === 0) {
-    return {
-      matchedCount: 0,
-      popularMoves: [],
+  const moveMap = new Map<
+    string,
+    {
+      count: number
+      decisiveCount: number
+      win: number
     }
-  }
+  >()
 
-  const grouped = new Map<string, PositionRecord[]>()
+  matched.forEach(r => {
+    const key = r.nextMoveText
 
-  for (const record of matched) {
-    const list = grouped.get(record.nextMoveText) ?? []
-    list.push(record)
-    grouped.set(record.nextMoveText, list)
-  }
+    if (!moveMap.has(key)) {
+      moveMap.set(key, {
+        count: 0,
+        decisiveCount: 0,
+        win: 0,
+      })
+    }
 
-  const popularMoves: PopularMoveStat[] = Array.from(grouped.entries())
-    .map(([moveText, moveRecords]) => {
-      const decisive = moveRecords.filter(
-        record => record.winner === "black" || record.winner === "white"
-      )
+    const data = moveMap.get(key)!
+    data.count++
 
-      // この局面で指した側が勝った率
-      const movePlayerWins = decisive.filter(
-        record => record.sideToMove === record.winner
-      ).length
+    // 勝敗がついた対局のみ勝率計算対象にする
+    if (r.winner === "black" || r.winner === "white") {
+      data.decisiveCount++
 
-      return {
-        moveText,
-        count: moveRecords.length,
-        movePlayerWinRate:
-          decisive.length > 0 ? movePlayerWins / decisive.length : 0,
+      if (r.winner === r.sideToMove) {
+        data.win++
       }
-    })
+    }
+  })
+
+  const popularMoves = Array.from(moveMap.entries())
+    .map(([moveText, data]) => ({
+      moveText,
+      count: data.count,
+      movePlayerWinRate:
+        data.decisiveCount > 0 ? data.win / data.decisiveCount : 0,
+    }))
     .sort((a, b) => {
       if (b.count !== a.count) return b.count - a.count
-      return b.movePlayerWinRate - a.movePlayerWinRate
+      if (b.movePlayerWinRate !== a.movePlayerWinRate) {
+        return b.movePlayerWinRate - a.movePlayerWinRate
+      }
+      return a.moveText.localeCompare(b.moveText, "ja")
     })
     .slice(0, limit)
 
+  const topCount = popularMoves[0]?.count ?? 0
+  const topMoveShare = matchedCount > 0 ? topCount / matchedCount : 0
+
   return {
-    matchedCount: matched.length,
+    matchedCount,
     popularMoves,
+    topMoveShare,
   }
 }
