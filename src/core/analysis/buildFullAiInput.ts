@@ -3,17 +3,13 @@
 import type { Board } from "../board/Board"
 import type { Move } from "../board/Move"
 import type { PieceType, Player } from "../board/Piece"
-import { serializeBoard } from "../utils/boardSerializer"
 import type { MoveAnalysisContext } from "./MoveAnalysisContext"
 import type { CandidateMoveAnalysis } from "./analyzeCandidateMoves"
 import type { MoveComparison } from "./compareWithBestMove"
 import type { OpeningInfo } from "./detectOpening"
 import type { CastleInfo } from "./detectCastle"
 import type { PositionFeatures } from "./extractPositionFeatures"
-
-// 追加
-import type { PositionRecord } from "../history/PositionRecord"
-import { findSimilarPositions } from "../history/findSimilarPositions"
+import type { SimilarPositionResult } from "../history/findSimilarPositions"
 
 type AiSquare = {
   x: number
@@ -75,15 +71,10 @@ export type FullAiInput = {
   castleInfo: CastleInfo
   positionFeatures: PositionFeatures
 
-  historicalContext: {
-    matchedCount: number
-    popularMoves: Array<{
-      moveText: string
-      count: number
-      movePlayerWinRate: number
-    }>
-    topMoveShare: number
-  } | null
+  /**
+   * DBまたは配列検索で取得済みの過去棋譜傾向
+   */
+  historicalContext: SimilarPositionResult | null
 }
 
 /**
@@ -139,6 +130,8 @@ const moveToAiMove = (move: Move): AiMoveState => {
 
 /**
  * ChatGPTに渡すための完全入力を構築する
+ *
+ * historicalContext は外で取得済みのものを受け取る
  */
 export const buildFullAiInput = (
   ctx: MoveAnalysisContext | null,
@@ -148,25 +141,8 @@ export const buildFullAiInput = (
   openingInfo: OpeningInfo,
   castleInfo: CastleInfo,
   positionFeatures: PositionFeatures,
-  positionRecords: PositionRecord[] = []
+  historicalContext: SimilarPositionResult | null = null
 ): FullAiInput => {
-  // 解析対象がある場合は「その手を指す前の局面」を履歴検索に使う
-  const targetBoard = ctx ? ctx.beforeBoard : currentBoard
-  const positionKey = serializeBoard(targetBoard)
-
-  // 👇 デバッグログ追加
-  if (positionRecords.length > 0) {
-    console.log("===== position debug =====")
-    console.log("current key:", positionKey)
-    console.log("sample key:", positionRecords[0].positionKey)
-    console.log("records length:", positionRecords.length)
-  }
-
-  const historicalContext =
-    positionRecords.length > 0
-      ? findSimilarPositions(positionKey, positionRecords, 5)
-      : null
-
   return {
     moveIndex: ctx?.moveIndex ?? 0,
     lineType: ctx?.lineType ?? "mainline",

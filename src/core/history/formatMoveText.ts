@@ -21,8 +21,17 @@ const PIECE_MAP: Record<PieceType, string> = {
 /**
  * 半角数字を全角数字に変換
  */
-const toFullWidth = (num: number): string => {
+const toFileText = (num: number): string => {
   return "０１２３４５６７８９"[num]
+}
+
+/**
+ * 漢数字に変換
+ * @param num 
+ * @returns 
+ */
+const toRankText = (num: number): string => {
+  return ["", "一", "二", "三", "四", "五", "六", "七", "八", "九"][num]
 }
 
 /**
@@ -32,7 +41,7 @@ const toFullWidth = (num: number): string => {
 const toSquareText = (x: number, y: number): string => {
   const file = 9 - x
   const rank = y + 1
-  return `${toFullWidth(file)}${toFullWidth(rank)}`
+  return `${toFileText(file)}${toRankText(rank)}`
 }
 
 /**

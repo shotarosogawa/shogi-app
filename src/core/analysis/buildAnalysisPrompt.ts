@@ -82,7 +82,9 @@ const buildHistoricalSummary = (input: FullAiInput): string => {
     const winRate = Math.round(move.movePlayerWinRate * 100)
 
     let label = ""
-    if (winRate >= 60) label = "勝率やや高め"
+    if (winRate >= 80) label = "勝率高め"
+    else if (winRate >= 60) label = "勝率やや高め"
+    else if (winRate <= 20) label = "勝率低め"
     else if (winRate <= 40) label = "勝率やや低め"
     else label = "勝率は概ね平均的"
 

@@ -8,12 +8,13 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "server": "tsx server/analyzeShogi.ts"
+    "server": "tsx src/server/index.ts"
   },
   "dependencies": {
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
+    "mongodb": "^7.1.1",
     "openai": "^6.32.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"

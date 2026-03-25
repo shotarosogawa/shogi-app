@@ -2,3 +2,79 @@ body {
   margin: 0;
   font-family: sans-serif;
 }
+
+.history-panel {
+  margin-top: 12px;
+  padding: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.history-title {
+  margin: 0 0 12px;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.history-empty {
+  margin: 0;
+  font-size: 14px;
+  opacity: 0.85;
+}
+
+.history-summary-line {
+  margin-bottom: 14px;
+  font-size: 14px;
+  line-height: 1.6;
+  opacity: 0.92;
+}
+
+.history-summary-sep {
+  display: inline-block;
+  margin: 0 8px;
+  opacity: 0.5;
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.history-row {
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  gap: 10px;
+  padding: 10px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.history-row:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.history-rank {
+  font-size: 14px;
+  font-weight: 700;
+  opacity: 0.85;
+}
+
+.history-content {
+  min-width: 0;
+}
+
+.history-move {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.4;
+  margin-bottom: 4px;
+}
+
+.history-sub {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  opacity: 0.78;
+}

@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import "./App.css"
-import { ShogiBoard } from "./components/ShogiBoard"
 import { GameResultModal } from "./components/GameResultModal"
+import { HistoryPanel } from "./components/HistoryPanel"
+import { ShogiBoard } from "./components/ShogiBoard"
 import type { AnalysisTarget } from "./core/analysis/AnalysisTarget"
 import { analyzeCandidateMoves } from "./core/analysis/analyzeCandidateMoves"
 import { buildAnalysisPrompt } from "./core/analysis/buildAnalysisPrompt"
@@ -14,11 +15,11 @@ import { detectCastle } from "./core/analysis/detectCastle"
 import { detectOpening } from "./core/analysis/detectOpening"
 import { extractPositionFeatures } from "./core/analysis/extractPositionFeatures"
 import type { MoveAnalysisContext } from "./core/analysis/MoveAnalysisContext"
-import { BoardFactory } from "./core/board/BoardFactory"
 import type { Board } from "./core/board/Board"
+import { BoardFactory } from "./core/board/BoardFactory"
 import type { Move } from "./core/board/Move"
 import { buildPositionRecords } from "./core/history/buildPositionRecords"
-import { sampleGameData } from "./core/history/sampleGameData"
+import type { SimilarPositionResult } from "./core/history/findSimilarPositions"
 import { sampleGameList } from "./core/history/sampleGameList"
 import { AttackDetector } from "./core/rules/AttackDetector"
 import { MoveApplier } from "./core/rules/MoveApplier"
@@ -28,23 +29,17 @@ import { serializeBoard } from "./core/utils/boardSerializer"
 
 type ReviewTab = "mainline" | "variation"
 type SideTab = "kifu" | "analysis"
+type AnalysisTab = "explain" | "history"
 type FollowupMode = "none" | "why" | "best" | "other" | "chat"
 
 function App() {
-  // 初期局面は初回だけ生成する
   const initialBoard = useMemo(() => BoardFactory.createInitialBoard(), [])
 
-  // =========================
-  // 通常対局用 state
-  // =========================
-
-  // 数字を漢数字に変換（段用）
   const numToKanji = (num: number) => {
     const map = ["", "一", "二", "三", "四", "五", "六", "七", "八", "九"]
     return map[num] ?? ""
   }
 
-  // 駒名マップ（成りも含む）
   const PIECE_LABELS: Record<string, string> = {
     FU: "歩",
     KY: "香",
@@ -62,93 +57,49 @@ function App() {
     RY: "龍",
   }
 
-  // 現在の対局盤面
   const [board, setBoard] = useState<Board>(initialBoard)
-
-  // 本譜の棋譜
   const [moveHistory, setMoveHistory] = useState<Move[]>([])
-
-  // 本譜の局面履歴
   const [boardHistory, setBoardHistory] = useState<Board[]>([initialBoard])
-
-  // 各指し手が王手だったか
   const [moveChecks, setMoveChecks] = useState<boolean[]>([])
-
-  // 局面キー履歴（千日手用）
   const [boardKeys, setBoardKeys] = useState<string[]>([
     serializeBoard(initialBoard),
   ])
-
-  // 本譜の現在位置
   const [currentMoveIndex, setCurrentMoveIndex] = useState(0)
-
-  // 本譜の最終手ハイライト用
   const [lastMove, setLastMove] = useState<Move | null>(null)
 
-  // =========================
-  // 感想戦用 state
-  // =========================
-
-  // 感想戦中かどうか
   const [isReviewMode, setIsReviewMode] = useState(false)
-
-  // 感想戦の中で、本譜を見るか / 局面編集するか
   const [reviewTab, setReviewTab] = useState<ReviewTab>("mainline")
-
-  // 感想戦で本譜を何手目として見ているか
   const [reviewMoveIndex, setReviewMoveIndex] = useState(0)
-
-  // 局面編集用の盤面
   const [variationBoard, setVariationBoard] = useState<Board | null>(null)
-
-  // 局面編集用の棋譜
   const [variationMoveHistory, setVariationMoveHistory] = useState<Move[]>([])
-
-  // 局面編集用の局面履歴
   const [variationBoardHistory, setVariationBoardHistory] = useState<Board[]>([])
-
-  // 局面編集用の現在位置
   const [variationMoveIndex, setVariationMoveIndex] = useState(0)
-
-  // 局面編集用の最終手ハイライト
   const [variationLastMove, setVariationLastMove] = useState<Move | null>(null)
 
-  // =========================
-  // 共通 UI state
-  // =========================
-
-  // 駒移動アニメーション用
   const [animatingMove, setAnimatingMove] = useState<Move | null>(null)
-
-  // 終局モーダル表示
   const [showResultModal, setShowResultModal] = useState(false)
 
-  // 右パネルのタブ
   const [sideTab, setSideTab] = useState<SideTab>("kifu")
+  const [analysisTab, setAnalysisTab] = useState<AnalysisTab>("explain")
 
-  // 候補手選択
   const [selectedCandidateIndex, setSelectedCandidateIndex] = useState<number | null>(null)
 
-  // ルール関連クラスは使い回す
   const generator = useMemo(() => new MoveGenerator(), [])
   const attackDetector = useMemo(() => new AttackDetector(), [])
   const moveApplier = useMemo(() => new MoveApplier(), [])
 
-  // 棋譜リストの自動スクロール用
   const activeMoveRef = useRef<HTMLButtonElement | null>(null)
 
-  // AI解説表示用
   const [analysisLogs, setAnalysisLogs] = useState<string[]>([])
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [analysisError, setAnalysisError] = useState("")
-  const [followupMode, setFollowupMode] = useState<"none" | "why" | "best" | "other" | "chat">("none")
-  // チャット
+  const [followupMode, setFollowupMode] = useState<FollowupMode>("none")
   const [chatInput, setChatInput] = useState("")
 
-  // =========================
-  // 通常対局の終局判定
-  // ※ 終局判定は本譜だけを対象にする
-  // =========================
+  const [historicalContext, setHistoricalContext] =
+  useState<SimilarPositionResult | null>(null)
+
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false)
 
   const currentTurn = board.getTurn()
 
@@ -160,32 +111,23 @@ function App() {
     return attackDetector.isKingInCheck(board, currentTurn)
   }, [board, currentTurn, attackDetector])
 
-  // 現在局面のキー
   const currentBoardKey = boardKeys[currentMoveIndex]
 
-  // 開始局面（index 0）は千日手カウントから除外する
   const sameBoardCount = boardKeys
     .slice(1)
     .filter(key => key === currentBoardKey)
     .length
 
-  // 詰み / 合法手なし / 千日手
   const isCheckmate = legalMoves.length === 0 && inCheck
   const isNoLegalMoves = legalMoves.length === 0 && !inCheck
   const isSennichite = sameBoardCount >= 4
-
-  // 詰み or 合法手なし → 投了扱い
   const isResign = isCheckmate || isNoLegalMoves
-
-  // 終局扱い
   const isGameOver = isCheckmate || isNoLegalMoves || isSennichite
 
-  // 連続王手千日手かどうか
   const isPerpetualCheck = isSennichite
     ? isPerpetualCheckSennichite(boardKeys, moveChecks, currentMoveIndex)
     : false
 
-  // 終局行の表示内容をまとめる
   const gameResultItem = isPerpetualCheck
     ? {
         label: `${currentTurn === "black" ? "▲" : "△"}反則勝ち`,
@@ -203,14 +145,12 @@ function App() {
           }
         : null
 
-  // 対局中のみ終局モーダルを表示する
   useEffect(() => {
     if (!isReviewMode && isGameOver) {
       setShowResultModal(true)
     }
   }, [isGameOver, isReviewMode])
 
-  // 終局モーダル表示用メッセージ
   const resultTitle = isPerpetualCheck
     ? "反則勝ち"
     : isSennichite
@@ -227,11 +167,6 @@ function App() {
         ? `${currentTurn === "black" ? "後手" : "先手"}の勝ちです。`
         : ""
 
-  // =========================
-  // 表示用の盤面 / 最終手 / 操作可否
-  // モードによって切り替える
-  // =========================
-
   const displayBoard = useMemo(() => {
     if (!isReviewMode) {
       return board
@@ -244,12 +179,10 @@ function App() {
     return variationBoard ?? boardHistory[reviewMoveIndex] ?? board
   }, [isReviewMode, reviewTab, board, boardHistory, reviewMoveIndex, variationBoard])
 
-  // 解析用の合法手は、表示中盤面ベースで作る
   const analysisLegalMoves = useMemo(() => {
     return generator.generateLegalMoves(displayBoard)
   }, [displayBoard, generator])
 
-  // 現在表示中の局面を、解析対象としてまとめる
   const currentAnalysisTarget: AnalysisTarget = useMemo(() => {
     if (!isReviewMode || reviewTab === "mainline") {
       return createAnalysisTarget({
@@ -278,12 +211,10 @@ function App() {
     variationMoveHistory,
   ])
 
-  // 現在局面の候補手を評価順に並べる
   const currentCandidateMoves = useMemo(() => {
     return analyzeCandidateMoves(displayBoard, analysisLegalMoves)
   }, [displayBoard, analysisLegalMoves])
 
-  // 候補手選択時の仮想局面
   const analysisBoard = useMemo(() => {
     if (selectedCandidateIndex === null) {
       return displayBoard
@@ -297,7 +228,6 @@ function App() {
     return moveApplier.apply(displayBoard, candidate.move)
   }, [selectedCandidateIndex, currentCandidateMoves, displayBoard, moveApplier])
 
-  // 候補手選択時は、その手を1手進めた解析対象を作る
   const selectedAnalysisTarget: AnalysisTarget = useMemo(() => {
     if (selectedCandidateIndex === null) {
       return currentAnalysisTarget
@@ -337,14 +267,19 @@ function App() {
   const openingInfo = useMemo(() => detectOpening(displayBoard), [displayBoard])
   const castleInfo = useMemo(() => detectCastle(displayBoard), [displayBoard])
   const positionFeatures = useMemo(() => extractPositionFeatures(displayBoard), [displayBoard])
-  // const positionRecords = useMemo(() => {
-  //   return buildPositionRecords(sampleGameData)
-  // }, [])
+
   const positionRecords = useMemo(() => {
     return sampleGameList.flatMap(game => buildPositionRecords(game))
   }, [])
+  
+  const historyTargetBoard = targetMoveAnalysisContext
+    ? targetMoveAnalysisContext.beforeBoard
+    : analysisBoard
 
-  // ChatGPTに渡すための完全入力
+  const historyPositionKey = useMemo(() => {
+    return serializeBoard(historyTargetBoard)
+  }, [historyTargetBoard])
+
   const fullAiInput: FullAiInput = useMemo(() => {
     return buildFullAiInput(
       targetMoveAnalysisContext,
@@ -354,7 +289,7 @@ function App() {
       openingInfo,
       castleInfo,
       positionFeatures,
-      positionRecords
+      historicalContext
     )
   }, [
     targetMoveAnalysisContext,
@@ -364,9 +299,9 @@ function App() {
     openingInfo,
     castleInfo,
     positionFeatures,
+    historicalContext,
   ])
 
-  // ChatGPT に渡す解析プロンプト
   const analysisPrompt = useMemo(() => {
     return buildAnalysisPrompt(fullAiInput, followupMode)
   }, [fullAiInput, followupMode])
@@ -395,14 +330,16 @@ function App() {
     return false
   }, [isReviewMode, reviewTab, isGameOver])
 
-  // 局面が変わったら候補手選択を解除
   useEffect(() => {
     setSelectedCandidateIndex(null)
   }, [currentMoveIndex, reviewMoveIndex, variationMoveIndex, reviewTab, isReviewMode])
 
-  // =========================
-  // 通常対局用ハンドラ
-  // =========================
+  useEffect(() => {
+    if (!isReviewMode) {
+      setAnalysisTab("explain")
+      setSideTab("kifu")
+    }
+  }, [isReviewMode])
 
   const handleChangeBoard = (nextBoard: Board) => {
     const isCheckMove = attackDetector.isKingInCheck(nextBoard, nextBoard.getTurn())
@@ -456,10 +393,6 @@ function App() {
     setShowResultModal(false)
   }
 
-  // =========================
-  // 感想戦：本譜閲覧ハンドラ
-  // =========================
-
   const handleEnterReviewMode = () => {
     setShowResultModal(false)
     setIsReviewMode(true)
@@ -474,6 +407,7 @@ function App() {
 
     setAnimatingMove(null)
     setSideTab("kifu")
+    setAnalysisTab("explain")
   }
 
   const handleExitReviewMode = () => {
@@ -489,18 +423,17 @@ function App() {
 
     setAnimatingMove(null)
     setSideTab("kifu")
+    setAnalysisTab("explain")
   }
 
   const goToReviewMove = (index: number) => {
     if (index < 0 || index > boardHistory.length - 1) return
-
     setReviewMoveIndex(index)
     setAnimatingMove(null)
   }
 
   const startVariationFromCurrentMainline = () => {
     const baseBoard = boardHistory[reviewMoveIndex]
-
     if (!baseBoard) return
 
     setVariationBoard(baseBoard)
@@ -512,17 +445,15 @@ function App() {
     setReviewTab("variation")
     setAnimatingMove(null)
     setSideTab("kifu")
+    setAnalysisTab("explain")
   }
 
   const backToMainlineReview = () => {
     setReviewTab("mainline")
     setAnimatingMove(null)
     setSideTab("kifu")
+    setAnalysisTab("explain")
   }
-
-  // =========================
-  // 感想戦：局面編集ハンドラ
-  // =========================
 
   const handleVariationChangeBoard = (nextBoard: Board) => {
     setVariationBoard(nextBoard)
@@ -553,14 +484,12 @@ function App() {
     setAnimatingMove(null)
   }
 
-  // 座標を「７六」形式に変換
   const formatPosition = (pos: { x: number; y: number }) => {
     const file = 9 - pos.x
     const rank = pos.y + 1
     return `${file}${numToKanji(rank)}`
   }
 
-  // 棋譜フォーマット本体
   const getMoveLabel = (move: Move, index: number, moves: Move[]) => {
     const turn = index % 2 === 0 ? "▲" : "△"
     const prevMove = moves[index - 1]
@@ -593,7 +522,6 @@ function App() {
     return `${index + 1}: ${turn}${destination}${pieceLabel}${fromLabel}`
   }
 
-  // 候補手表示用の簡易ラベル
   const getCandidateMoveLabel = (move: Move) => {
     const destination = formatPosition(move.to)
     let pieceLabel = PIECE_LABELS[move.piece]
@@ -615,15 +543,12 @@ function App() {
     return `${destination}${pieceLabel}`
   }
 
-  // 本譜一覧を見ている状態かどうか
   const isMainlineView = !isReviewMode || reviewTab === "mainline"
 
-  // 本譜一覧で現在どの局面を見ているか
   const activeMainlineIndex = !isReviewMode
     ? currentMoveIndex
     : reviewMoveIndex
 
-  // 現在の局面位置が変わったら、対応する棋譜行が見える位置まで自動スクロールする
   useEffect(() => {
     if (sideTab === "kifu") {
       activeMoveRef.current?.scrollIntoView({
@@ -652,6 +577,7 @@ function App() {
     try {
       setFollowupMode(mode)
       setSideTab("analysis")
+      setAnalysisTab("explain")
       setIsAnalyzing(true)
       setAnalysisError("")
 
@@ -669,7 +595,7 @@ function App() {
         userQuestion
       )
 
-      const response = await fetch("http://localhost:3001/api/analyze-shogi", {
+      const response = await fetch("http://localhost:3001/api/analyze", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -705,7 +631,7 @@ function App() {
     const text = chatInput.trim()
     if (!text) return
 
-    const mode = "chat"
+    const mode: FollowupMode = "chat"
     const nextLogs = [...analysisLogs, `👤 ${text}`]
 
     setAnalysisLogs(nextLogs)
@@ -713,10 +639,6 @@ function App() {
 
     await handleAnalyzeWithAi(mode, text, nextLogs)
   }
-
-  // =========================
-  // リスタート
-  // =========================
 
   const handleRestart = () => {
     const newInitialBoard = BoardFactory.createInitialBoard()
@@ -741,15 +663,12 @@ function App() {
     setAnimatingMove(null)
     setShowResultModal(false)
     setSideTab("kifu")
+    setAnalysisTab("explain")
     setAnalysisLogs([])
     setAnalysisError("")
     setIsAnalyzing(false)
     setSelectedCandidateIndex(null)
   }
-
-  // =========================
-  // レイアウト用の固定スタイル
-  // =========================
 
   const mainLayoutStyle = {
     display: "grid",
@@ -781,12 +700,58 @@ function App() {
     gap: 16,
   }
 
+  const mainTabButtonStyle = (active: boolean) => ({
+    flex: 1,
+    padding: "8px 0",
+    backgroundColor: active ? "#1976d2" : "#333",
+    color: "#fff",
+    border: "none",
+    borderRadius: 6,
+    cursor: "pointer",
+  })
+
+  const subTabButtonStyle = (active: boolean) => ({
+    flex: 1,
+    padding: "6px 0",
+    backgroundColor: active ? "#388e3c" : "#333",
+    color: "#fff",
+    border: "none",
+    borderRadius: 6,
+    cursor: "pointer",
+  })
+
+  useEffect(() => {
+    const fetchHistory = async () => {
+      try {
+        setIsHistoryLoading(true)
+
+        const res = await fetch(
+          `http://localhost:3001/api/history?positionKey=${encodeURIComponent(historyPositionKey)}`
+        )
+
+        if (!res.ok) {
+          setHistoricalContext(null)
+          return
+        }
+
+        const data: SimilarPositionResult = await res.json()
+        setHistoricalContext(data)
+      } catch (error) {
+        console.error("履歴取得失敗", error)
+        setHistoricalContext(null)
+      } finally {
+        setIsHistoryLoading(false)
+      }
+    }
+
+    fetchHistory()
+  }, [historyPositionKey])
+
   return (
     <div style={{ padding: 24 }}>
       <h1>将棋アプリ</h1>
 
       <div style={mainLayoutStyle}>
-        {/* 左側：将棋盤本体 */}
         <div style={boardColumnStyle}>
           <ShogiBoard
             board={displayBoard}
@@ -807,43 +772,26 @@ function App() {
           />
         </div>
 
-        {/* 右側：タブ切り替えパネル */}
         <div style={sidePanelStyle}>
           <div style={sidePanelCardStyle}>
-            {/* タブボタン */}
             <div style={{ display: "flex", gap: 8 }}>
               <button
                 onClick={() => setSideTab("kifu")}
-                style={{
-                  flex: 1,
-                  padding: "8px 0",
-                  backgroundColor: sideTab === "kifu" ? "#1976d2" : "#333",
-                  color: "#fff",
-                  border: "none",
-                  borderRadius: 6,
-                  cursor: "pointer",
-                }}
+                style={mainTabButtonStyle(sideTab === "kifu")}
               >
                 棋譜
               </button>
 
-              <button
-                onClick={() => setSideTab("analysis")}
-                style={{
-                  flex: 1,
-                  padding: "8px 0",
-                  backgroundColor: sideTab === "analysis" ? "#1976d2" : "#333",
-                  color: "#fff",
-                  border: "none",
-                  borderRadius: 6,
-                  cursor: "pointer",
-                }}
-              >
-                AI解説
-              </button>
+              {isReviewMode && (
+                <button
+                  onClick={() => setSideTab("analysis")}
+                  style={mainTabButtonStyle(sideTab === "analysis")}
+                >
+                  AI解説
+                </button>
+              )}
             </div>
 
-            {/* 棋譜タブ */}
             {sideTab === "kifu" && (
               <>
                 <div style={{ fontWeight: "bold", fontSize: 18 }}>
@@ -1066,6 +1014,10 @@ function App() {
                       >
                         変化手順
                       </button>
+
+                      <button onClick={handleExitReviewMode}>
+                        感想戦終了
+                      </button>
                     </>
                   )}
                 </div>
@@ -1104,158 +1056,185 @@ function App() {
               </>
             )}
 
-            {/* AI解説タブ */}
-            {sideTab === "analysis" && (
+            {isReviewMode && sideTab === "analysis" && (
               <>
                 <div style={{ fontWeight: "bold", fontSize: 18 }}>
                   AI解説
                 </div>
 
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                  {currentCandidateMoves.slice(0, 5).map((c, i) => {
-                    const isActive = selectedCandidateIndex === i
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button
+                    onClick={() => setAnalysisTab("explain")}
+                    style={subTabButtonStyle(analysisTab === "explain")}
+                  >
+                    解説
+                  </button>
 
-                    return (
+                  <button
+                    onClick={() => setAnalysisTab("history")}
+                    style={subTabButtonStyle(analysisTab === "history")}
+                  >
+                    実戦
+                  </button>
+                </div>
+
+                {analysisTab === "history" && (
+                  <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+                    <HistoryPanel
+                      historicalContext={historicalContext}
+                      isLoading={isHistoryLoading}
+                    />
+                  </div>
+                )}
+
+                {analysisTab === "explain" && (
+                  <>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                      {currentCandidateMoves.slice(0, 5).map((c, i) => {
+                        const isActive = selectedCandidateIndex === i
+
+                        return (
+                          <button
+                            key={i}
+                            onClick={() => setSelectedCandidateIndex(i)}
+                            style={{
+                              padding: "6px 10px",
+                              borderRadius: 6,
+                              border: isActive ? "2px solid #64b5f6" : "1px solid #666",
+                              background: isActive ? "rgba(100,181,246,0.2)" : "transparent",
+                              cursor: "pointer",
+                            }}
+                          >
+                            {getCandidateMoveLabel(c.move)}
+                          </button>
+                        )
+                      })}
+
                       <button
-                        key={i}
-                        onClick={() => setSelectedCandidateIndex(i)}
+                        onClick={() => setSelectedCandidateIndex(null)}
                         style={{
                           padding: "6px 10px",
                           borderRadius: 6,
-                          border: isActive ? "2px solid #64b5f6" : "1px solid #666",
-                          background: isActive ? "rgba(100,181,246,0.2)" : "transparent",
+                          border: selectedCandidateIndex === null ? "2px solid #81c784" : "1px solid #666",
+                          background: selectedCandidateIndex === null ? "rgba(129,199,132,0.2)" : "transparent",
                           cursor: "pointer",
                         }}
                       >
-                        {getCandidateMoveLabel(c.move)}
+                        現在の手
                       </button>
-                    )
-                  })}
+                    </div>
 
-                  <button
-                    onClick={() => setSelectedCandidateIndex(null)}
-                    style={{
-                      padding: "6px 10px",
-                      borderRadius: 6,
-                      border: selectedCandidateIndex === null ? "2px solid #81c784" : "1px solid #666",
-                      background: selectedCandidateIndex === null ? "rgba(129,199,132,0.2)" : "transparent",
-                      cursor: "pointer",
-                    }}
-                  >
-                    現在の手
-                  </button>
-                </div>
+                    <div style={{ marginTop: 4, display: "flex", justifyContent: "center" }}>
+                      <button onClick={() => handleFollowup("none")} disabled={isAnalyzing}>
+                        {isAnalyzing ? "解析中..." : "AIで解説"}
+                      </button>
+                    </div>
 
-                <div style={{ marginTop: 4, display: "flex", justifyContent: "center" }}>
-                  <button onClick={() => handleFollowup("none")} disabled={isAnalyzing}>
-                    {isAnalyzing ? "解析中..." : "AIで解説"}
-                  </button>
-                </div>
+                    {analysisError && (
+                      <div style={{ color: "#ff6b6b" }}>
+                        {analysisError}
+                      </div>
+                    )}
 
-                {analysisError && (
-                  <div style={{ color: "#ff6b6b" }}>
-                    {analysisError}
-                  </div>
-                )}
+                    {!analysisError && analysisLogs.length === 0 && !isAnalyzing && (
+                      <div style={{ opacity: 0.7, lineHeight: 1.8 }}>
+                        棋譜タブで局面を選んでから「AIで解説」を押すと、ここに解説が表示されます。
+                      </div>
+                    )}
 
-                {!analysisError && !analysisLogs && !isAnalyzing && (
-                  <div style={{ opacity: 0.7, lineHeight: 1.8 }}>
-                    棋譜タブで局面を選んでから「AIで解説」を押すと、ここに解説が表示されます。
-                  </div>
-                )}
+                    {isAnalyzing && (
+                      <div style={{ opacity: 0.8 }}>
+                        解析中...
+                      </div>
+                    )}
 
-                {isAnalyzing && (
-                  <div style={{ opacity: 0.8 }}>
-                    解析中...
-                  </div>
-                )}
+                    <div style={{ flex: 1, overflowY: "auto" }}>
+                      {analysisLogs.map((log, idx) => {
+                        const isUser = log.startsWith("👤")
 
-                <div style={{ flex: 1, overflowY: "auto" }}>
-                  {analysisLogs.map((log, idx) => {
-                    const isUser = log.startsWith("👤")
+                        return (
+                          <div
+                            key={idx}
+                            style={{
+                              textAlign: isUser ? "right" : "left",
+                              marginBottom: 8,
+                            }}
+                          >
+                            <div
+                              style={{
+                                display: "inline-block",
+                                padding: "8px 12px",
+                                borderRadius: 12,
+                                background: isUser ? "#1976d2" : "#333",
+                                color: "#fff",
+                                maxWidth: "90%",
+                                whiteSpace: "pre-wrap",
+                              }}
+                            >
+                              {log.replace("👤 ", "")}
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
 
-                    return (
-                      <div
-                        key={idx}
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: 8,
+                        marginTop: 8,
+                      }}
+                    >
+                      <input
+                        value={chatInput}
+                        onChange={(e) => setChatInput(e.target.value)}
+                        placeholder="例：なんでこの手悪い？"
                         style={{
-                          textAlign: isUser ? "right" : "left",
-                          marginBottom: 8,
+                          flex: 1,
+                          padding: "8px",
+                          borderRadius: 6,
+                          border: "1px solid #666",
+                          background: "#222",
+                          color: "#fff",
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            handleSendMessage()
+                          }
+                        }}
+                      />
+
+                      <button
+                        onClick={handleSendMessage}
+                        disabled={isAnalyzing}
+                        style={{
+                          padding: "8px 12px",
+                          borderRadius: 6,
+                          background: "#1976d2",
+                          color: "#fff",
+                          border: "none",
+                          cursor: "pointer",
                         }}
                       >
-                        <div
-                          style={{
-                            display: "inline-block",
-                            padding: "8px 12px",
-                            borderRadius: 12,
-                            background: isUser ? "#1976d2" : "#333",
-                            color: "#fff",
-                            maxWidth: "90%",
-                            whiteSpace: "pre-wrap",
-                          }}
-                        >
-                          {log.replace("👤 ", "")}
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-                
-                <div
-                  style={{
-                    display: "flex",
-                    gap: 8,
-                    marginTop: 8,
-                  }}
-                >
-                  <input
-                    value={chatInput}
-                    onChange={(e) => setChatInput(e.target.value)}
-                    placeholder="例：なんでこの手悪い？"
-                    style={{
-                      flex: 1,
-                      padding: "8px",
-                      borderRadius: 6,
-                      border: "1px solid #666",
-                      background: "#222",
-                      color: "#fff",
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        handleSendMessage()
-                      }
-                    }}
-                  />
+                        送信
+                      </button>
+                    </div>
 
-                  <button
-                    onClick={handleSendMessage}
-                    disabled={isAnalyzing}
-                    style={{
-                      padding: "8px 12px",
-                      borderRadius: 6,
-                      background: "#1976d2",
-                      color: "#fff",
-                      border: "none",
-                      cursor: "pointer",
-                    }}
-                  >
-                    送信
-                  </button>
-                </div>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button onClick={() => handleFollowup("why")}>
+                        なぜ？
+                      </button>
 
-                {/* 👇 ここに追加 */}
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button onClick={() => handleFollowup("why")}>
-                    なぜ？
-                  </button>
+                      <button onClick={() => handleFollowup("best")}>
+                        最善手
+                      </button>
 
-                  <button onClick={() => handleFollowup("best")}>
-                    最善手
-                  </button>
-
-                  <button onClick={() => handleFollowup("other")}>
-                    他の手
-                  </button>
-                </div>
+                      <button onClick={() => handleFollowup("other")}>
+                        他の手
+                      </button>
+                    </div>
+                  </>
+                )}
               </>
             )}
           </div>

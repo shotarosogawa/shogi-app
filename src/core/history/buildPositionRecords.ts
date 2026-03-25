@@ -12,6 +12,15 @@ export type GameRecordInput = {
   gameId: string
   winner: Player | "draw" | "unknown"
   moves: Move[]
+
+  // 棋譜に明示されていたメタ情報
+  metadata?: {
+    openingName?: string
+    eventName?: string
+    blackPlayerName?: string
+    whitePlayerName?: string
+    startDate?: string
+  }
 }
 
 /**
