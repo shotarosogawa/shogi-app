@@ -1,4 +1,5 @@
 import fs from "fs"
+import iconv from "iconv-lite"
 import path from "path"
 import { parseKif } from "./parseKif"
 import { buildGameId } from "./buildGameId"
@@ -12,7 +13,12 @@ export type ParsedKifFileResult = {
 }
 
 export const parseKifFile = (filePath: string): ParsedKifFileResult => {
-  const kifText = fs.readFileSync(filePath, "utf-8")
+  // バイナリで読む
+  const buffer = fs.readFileSync(filePath)
+
+  // Shift_JISとしてデコード
+  const kifText = iconv.decode(buffer, "shift_jis")
+
   const gameId = buildGameId(kifText)
 
   const game = parseKif(kifText, gameId)

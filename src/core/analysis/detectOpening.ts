@@ -68,7 +68,12 @@ const getMainStyleFromRookStyle = (
     return "unknown"
   }
 
-  if (rookStyle === "ibisha") {
+  if (
+    rookStyle === "ichikenbisha" ||
+    rookStyle === "ibisha" ||
+    rookStyle === "sodebisha" ||
+    rookStyle === "migishikenbisha"
+  ) {
     return "ibisha"
   }
 

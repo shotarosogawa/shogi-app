@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import "./App.css"
+import { EngineCandidatesPanel } from "./components/EngineCandidatesPanel"
 import { GameResultModal } from "./components/GameResultModal"
 import { HistoryPanel } from "./components/HistoryPanel"
 import { ShogiBoard } from "./components/ShogiBoard"
@@ -18,6 +19,7 @@ import type { MoveAnalysisContext } from "./core/analysis/MoveAnalysisContext"
 import type { Board } from "./core/board/Board"
 import { BoardFactory } from "./core/board/BoardFactory"
 import type { Move } from "./core/board/Move"
+import type { EngineAnalysisResult } from "./core/engine/EngineAnalysisResult"
 import { buildPositionRecords } from "./core/history/buildPositionRecords"
 import type { SimilarPositionResult } from "./core/history/findSimilarPositions"
 import { sampleGameList } from "./core/history/sampleGameList"
@@ -26,6 +28,7 @@ import { MoveApplier } from "./core/rules/MoveApplier"
 import { MoveGenerator } from "./core/rules/MoveGenerator"
 import { isPerpetualCheckSennichite } from "./core/rules/perpetualCheck"
 import { serializeBoard } from "./core/utils/boardSerializer"
+import { boardToSfen } from "./core/utils/boardToSfen"
 
 type ReviewTab = "mainline" | "variation"
 type SideTab = "kifu" | "analysis"
@@ -90,6 +93,8 @@ function App() {
 
   const activeMoveRef = useRef<HTMLButtonElement | null>(null)
 
+  const engineCacheRef = useRef(new Map<string, EngineAnalysisResult>())
+
   const [analysisLogs, setAnalysisLogs] = useState<string[]>([])
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [analysisError, setAnalysisError] = useState("")
@@ -100,6 +105,10 @@ function App() {
   useState<SimilarPositionResult | null>(null)
 
   const [isHistoryLoading, setIsHistoryLoading] = useState(false)
+
+  const [engineAnalysis, setEngineAnalysis] = useState<EngineAnalysisResult | null>(null)
+
+  const [isEngineLoading, setIsEngineLoading] = useState(false)
 
   const currentTurn = board.getTurn()
 
@@ -260,9 +269,9 @@ function App() {
   const targetMoveComparison = useMemo(() => {
     return compareWithBestMove(
       targetMoveAnalysisContext,
-      currentCandidateMoves
+      engineAnalysis
     )
-  }, [targetMoveAnalysisContext, currentCandidateMoves])
+  }, [targetMoveAnalysisContext, engineAnalysis])
 
   const openingInfo = useMemo(() => detectOpening(displayBoard), [displayBoard])
   const castleInfo = useMemo(() => detectCastle(displayBoard), [displayBoard])
@@ -284,22 +293,21 @@ function App() {
     return buildFullAiInput(
       targetMoveAnalysisContext,
       currentCandidateMoves,
-      targetMoveComparison,
-      analysisBoard,
       openingInfo,
       castleInfo,
       positionFeatures,
-      historicalContext
+      historicalContext,
+      engineAnalysis,
+      null
     )
   }, [
     targetMoveAnalysisContext,
     currentCandidateMoves,
-    targetMoveComparison,
-    analysisBoard,
     openingInfo,
     castleInfo,
     positionFeatures,
     historicalContext,
+    engineAnalysis,
   ])
 
   const analysisPrompt = useMemo(() => {
@@ -588,8 +596,36 @@ function App() {
       const historySource = historyOverride ?? analysisLogs
       const conversationHistory = buildConversationHistory(historySource)
 
+      // -----------------------------
+      // AI解説用に、1手前局面のエンジン解析を取得
+      // -----------------------------
+      const preMoveBoard = targetMoveAnalysisContext
+        ? targetMoveAnalysisContext.beforeBoard
+        : null
+
+      const postMoveBoard = analysisBoard
+
+      const preMoveEngineAnalysis = preMoveBoard
+        ? await fetchEngineAnalysis(preMoveBoard)
+        : null
+
+      const postMoveEngineAnalysis = postMoveBoard
+        ? await fetchEngineAnalysis(postMoveBoard)
+        : null
+
+      const promptInput = buildFullAiInput(
+        targetMoveAnalysisContext,
+        currentCandidateMoves,
+        openingInfo,
+        castleInfo,
+        positionFeatures,
+        historicalContext,
+        preMoveEngineAnalysis,
+        postMoveEngineAnalysis
+      )
+
       const prompt = buildAnalysisPrompt(
-        fullAiInput,
+        promptInput,
         mode,
         conversationHistory,
         userQuestion
@@ -720,6 +756,34 @@ function App() {
     cursor: "pointer",
   })
 
+  const fetchEngineAnalysis = async (
+    targetBoard: Board
+  ): Promise<EngineAnalysisResult | null> => {
+    const sfen = boardToSfen(targetBoard)
+
+    const cached = engineCacheRef.current.get(sfen)
+    if (cached) {
+      return cached
+    }
+
+    const response = await fetch("http://localhost:3001/api/engine/analyze", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ sfen }),
+    })
+
+    if (!response.ok) {
+      throw new Error("エンジン解析に失敗しました")
+    }
+
+    const data: EngineAnalysisResult = await response.json()
+    engineCacheRef.current.set(sfen, data)
+
+    return data
+  }
+
   useEffect(() => {
     const fetchHistory = async () => {
       try {
@@ -746,6 +810,35 @@ function App() {
 
     fetchHistory()
   }, [historyPositionKey])
+
+  // useEffect(() => {
+  //   const run = async () => {
+  //     try {
+  //       setIsEngineLoading(true)
+
+  //       const sfen = boardToSfen(analysisBoard)
+
+  //       const res = await fetch("http://localhost:3001/api/engine/analyze", {
+  //         method: "POST",
+  //         headers: {
+  //           "Content-Type": "application/json",
+  //         },
+  //         body: JSON.stringify({ sfen }),
+  //       })
+
+  //       const data = await res.json()
+
+  //       setEngineAnalysis(data)
+  //     } catch (e) {
+  //       console.error("engine error", e)
+  //       setEngineAnalysis(null)
+  //     } finally {
+  //       setIsEngineLoading(false)
+  //     }
+  //   }
+
+  //   run()
+  // }, [analysisBoard])
 
   return (
     <div style={{ padding: 24 }}>
@@ -1084,46 +1177,16 @@ function App() {
                       historicalContext={historicalContext}
                       isLoading={isHistoryLoading}
                     />
+                    <EngineCandidatesPanel
+                      engineAnalysis={engineAnalysis}
+                      board={analysisBoard}
+                      isLoading={isEngineLoading}
+                    />
                   </div>
                 )}
 
                 {analysisTab === "explain" && (
                   <>
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                      {currentCandidateMoves.slice(0, 5).map((c, i) => {
-                        const isActive = selectedCandidateIndex === i
-
-                        return (
-                          <button
-                            key={i}
-                            onClick={() => setSelectedCandidateIndex(i)}
-                            style={{
-                              padding: "6px 10px",
-                              borderRadius: 6,
-                              border: isActive ? "2px solid #64b5f6" : "1px solid #666",
-                              background: isActive ? "rgba(100,181,246,0.2)" : "transparent",
-                              cursor: "pointer",
-                            }}
-                          >
-                            {getCandidateMoveLabel(c.move)}
-                          </button>
-                        )
-                      })}
-
-                      <button
-                        onClick={() => setSelectedCandidateIndex(null)}
-                        style={{
-                          padding: "6px 10px",
-                          borderRadius: 6,
-                          border: selectedCandidateIndex === null ? "2px solid #81c784" : "1px solid #666",
-                          background: selectedCandidateIndex === null ? "rgba(129,199,132,0.2)" : "transparent",
-                          cursor: "pointer",
-                        }}
-                      >
-                        現在の手
-                      </button>
-                    </div>
-
                     <div style={{ marginTop: 4, display: "flex", justifyContent: "center" }}>
                       <button onClick={() => handleFollowup("none")} disabled={isAnalyzing}>
                         {isAnalyzing ? "解析中..." : "AIで解説"}

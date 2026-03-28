@@ -1,6 +1,5 @@
 import type { MoveAnalysisContext } from "./MoveAnalysisContext"
-import type { CandidateMoveAnalysis } from "./analyzeCandidateMoves"
-import { evaluateMove } from "./evaluateMove"
+import type { EngineAnalysisResult } from "../engine/EngineAnalysisResult"
 
 export type MoveComparison = {
   currentScore: number
@@ -10,31 +9,108 @@ export type MoveComparison = {
 }
 
 /**
- * 現在の手と最善手を比較する
+ * Move を USI に変換
+ * 例:
+ * - 通常手: 2b5e
+ * - 成り:   2b5e+
+ * - 打ち:   B*5e
+ */
+const moveToUsi = (ctx: MoveAnalysisContext): string => {
+  const move = ctx.move
+
+  // 打ち
+  if (move.drop) {
+    const pieceLetterMap = {
+      FU: "P",
+      KY: "L",
+      KE: "N",
+      GI: "S",
+      KI: "G",
+      KA: "B",
+      HI: "R",
+    } as const
+
+    const pieceLetter = pieceLetterMap[move.piece as keyof typeof pieceLetterMap]
+    if (!pieceLetter) {
+      return ""
+    }
+
+    const toFile = 9 - move.to.x
+    const toRank = String.fromCharCode("a".charCodeAt(0) + move.to.y)
+
+    return `${pieceLetter}*${toFile}${toRank}`
+  }
+
+  // 通常手
+  if (!move.from) {
+    return ""
+  }
+
+  const fromFile = 9 - move.from.x
+  const fromRank = String.fromCharCode("a".charCodeAt(0) + move.from.y)
+  const toFile = 9 - move.to.x
+  const toRank = String.fromCharCode("a".charCodeAt(0) + move.to.y)
+  const promote = move.promote ? "+" : ""
+
+  return `${fromFile}${fromRank}${toFile}${toRank}${promote}`
+}
+
+/**
+ * 現在の手とエンジン最善手を比較する
+ *
+ * 注意:
+ * - currentScore は、現在の手が MultiPV 候補に含まれている場合のみ取得できる
+ * - 候補外の手は、この時点では正確な cp が分からないため null 扱いにしたいが、
+ *   既存型に合わせて comparison 自体を null 返却にしている
  */
 export const compareWithBestMove = (
   ctx: MoveAnalysisContext | null,
-  candidates: CandidateMoveAnalysis[]
+  engineAnalysis: EngineAnalysisResult | null
 ): MoveComparison | null => {
-  if (!ctx || candidates.length === 0) return null
+  if (!ctx || !engineAnalysis || !engineAnalysis.bestMove) {
+    return null
+  }
 
-  const currentScore = evaluateMove(ctx)
+  const bestScore = engineAnalysis.evaluationCp
+  if (bestScore === null) {
+    return null
+  }
 
-  const best = candidates[0]
-  const bestScore = best.score
+  const currentUsi = moveToUsi(ctx)
+  if (!currentUsi) {
+    return null
+  }
 
-  const scoreDiff = currentScore - bestScore
+  const bestUsi = engineAnalysis.bestMove
+  const isBestMove = currentUsi === bestUsi
 
-  // 同じ手かどうか（雑判定）
-  const isBestMove =
-    ctx.move.to.x === best.move.to.x &&
-    ctx.move.to.y === best.move.to.y &&
-    ctx.move.piece === best.move.piece
+  // 最善手そのものなら current = best
+  if (isBestMove) {
+    return {
+      currentScore: bestScore,
+      bestScore,
+      scoreDiff: 0,
+      isBestMove: true,
+    }
+  }
+
+  // MultiPV 候補内にあるなら、その評価値を使用
+  const currentCandidate = engineAnalysis.candidates.find(candidate => {
+    return candidate.moveText === currentUsi
+  })
+
+  if (!currentCandidate || currentCandidate.evaluationCp === null) {
+    // 候補外の手は、この比較だけでは正確な currentScore が取れない
+    // ここで適当な値を入れると、また「互角」事故が起きるので null を返す
+    return null
+  }
+
+  const currentScore = currentCandidate.evaluationCp
 
   return {
     currentScore,
     bestScore,
-    scoreDiff,
-    isBestMove,
+    scoreDiff: currentScore - bestScore,
+    isBestMove: false,
   }
 }
