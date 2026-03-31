@@ -5,8 +5,9 @@ import type { Move } from "../board/Move"
 import type { PieceType, Player } from "../board/Piece"
 import type { MoveAnalysisContext } from "./MoveAnalysisContext"
 import type { CandidateMoveAnalysis } from "./analyzeCandidateMoves"
-import type { OpeningInfo } from "./detectOpening"
 import type { CastleInfo } from "./detectCastle"
+import type { OpeningInfo } from "./detectOpening"
+import { detectTactics, type DetectionResult } from "./detectTactics"
 import type { PositionFeatures } from "./extractPositionFeatures"
 import type { SimilarPositionResult } from "../history/findSimilarPositions"
 import type { EngineAnalysisResult } from "../engine/EngineAnalysisResult"
@@ -23,6 +24,7 @@ type AiBoardState = Record<string, AiSquareState>
 
 type AiPvStepDelta = {
   moveLabel: string
+  player: Player
   changedSquares: Record<string, AiSquareState>
   capturedPiece: AiSquareState
   isPromote: boolean
@@ -31,6 +33,11 @@ type AiPvStepDelta = {
 }
 
 type AiLineInfo = {
+  /**
+   * 先手視点の生評価値
+   */
+  rawEvaluationCp: number | null
+
   /**
    * 指した側視点に正規化済みの評価値
    * 良いほど大きい
@@ -55,6 +62,13 @@ type AiCandidateSummary = {
   isBest: boolean
 }
 
+type ThreatInfo = {
+  isTsumero: boolean
+  isHisshi: boolean
+  mate: number | null
+  attackMove: string | null
+}
+
 export type FullAiInput = {
   moveIndex: number
   lineType: "mainline" | "variation"
@@ -72,6 +86,17 @@ export type FullAiInput = {
   historicalContext: SimilarPositionResult | null
 
   candidates: AiCandidateSummary[]
+
+  tacticalFeatures: DetectionResult[]
+  mainTacticalFeature: DetectionResult | null
+  subTacticalFeatures: DetectionResult[]
+
+  /**
+   * 現状は pvDepth と同値
+   * 将来的に「読む深さ」と「見せる深さ」を分けたくなったらここで分離する
+   */
+  pvDisplaySteps: number
+  threatInfo: ThreatInfo | null
 }
 
 // =========================
@@ -191,13 +216,13 @@ const buildStepDelta = (
   beforeBoard: Board,
   move: Move
 ): AiPvStepDelta => {
+  const player = beforeBoard.getTurn()
   const afterBoard = moveApplier.apply(beforeBoard, move)
-
-  // apply後は手番が反転しているので、afterBoard.getTurn() 側が「王手されている側」
   const givesCheck = attackDetector.isKingInCheck(afterBoard, afterBoard.getTurn())
 
   return {
     moveLabel: moveToJapaneseLabel(move, beforeBoard),
+    player,
     changedSquares: buildChangedSquares(beforeBoard, afterBoard),
     capturedPiece: buildCapturedPiece(beforeBoard, move),
     isPromote: !!move.promote,
@@ -296,7 +321,7 @@ const appendMoveIfMissing = (
 const buildPvSteps = (
   startBoard: Board,
   usiMoves: string[],
-  maxSteps = 4
+  maxSteps = PV_MAX_STEPS
 ): AiPvStepDelta[] => {
   const steps: AiPvStepDelta[] = []
   let currentBoard = startBoard
@@ -325,10 +350,6 @@ const normalizeCpForPlayer = (
   player: Player
 ): number | null => {
   if (cp === null) return null
-
-  // evaluationCp は先手視点:
-  // black(先手) はそのまま
-  // white(後手) は反転
   return player === "black" ? cp : -cp
 }
 
@@ -368,52 +389,34 @@ const buildCandidateSummaries = (
   })
 }
 
-/**
- * mate代用値をmate情報に変換する
- *
- * 前提:
- * - evaluationCp に 30000 / -30000 のような値が入ることがある
- * - 正負は先手視点
- *
- * 返り値:
- * - 指した側にとって良いmateなら正
- * - 指した側が詰まされるなら負
- */
-const extractMateFromCp = (
-  cp: number | null,
+const normalizeMateForPlayer = (
+  mate: number | null,
   player: Player
 ): number | null => {
-  if (cp === null) return null
+  if (mate === null) return null
 
-  // 代用値閾値。必要なら後で調整
-  if (Math.abs(cp) < 20000) {
-    return null
-  }
-
-  const normalized = normalizeCpForPlayer(cp, player)
-  if (normalized === null) return null
-
-  // 手数不明なので符号だけ残す
-  return normalized > 0 ? 1 : -1
+  // engineのmateは先手視点扱いに揃える
+  return player === "black" ? mate : -mate
 }
 
 /**
  * mate代用値なら cp 表示は捨てる
  */
 const sanitizeCp = (cp: number | null): number | null => {
-  if (cp === null) return null
-  if (Math.abs(cp) >= 20000) return null
   return cp
 }
 
 const buildBestLine = (
   beforeBoard: Board | null,
   engineAnalysis: EngineAnalysisResult | null,
-  player: Player | null
+  player: Player | null,
+  pvDepth: number
 ): AiLineInfo | null => {
   if (!beforeBoard || !engineAnalysis) return null
 
   const rawCp = engineAnalysis.evaluationCp
+  const rawMate = engineAnalysis.mate
+
   const normalizedCp =
     player !== null
       ? normalizeCpForPlayer(sanitizeCp(rawCp), player)
@@ -421,8 +424,8 @@ const buildBestLine = (
 
   const mate =
     player !== null
-      ? extractMateFromCp(rawCp, player)
-      : null
+      ? normalizeMateForPlayer(rawMate, player)
+      : rawMate
 
   const pvUsi = appendMoveIfMissing(
     engineAnalysis.bestMove,
@@ -430,20 +433,31 @@ const buildBestLine = (
   )
 
   return {
+    rawEvaluationCp: sanitizeCp(rawCp),
     evaluationCp: normalizedCp,
     mate,
-    steps: buildPvSteps(beforeBoard, pvUsi, PV_MAX_STEPS),
+    steps: buildPvSteps(beforeBoard, pvUsi, pvDepth),
   }
 }
 
 const buildPlayedLine = (
-  ctx: MoveAnalysisContext | null,
+  beforeBoard: Board | null,
+  move: Move | null,
+  afterBoard: Board | null,
   afterEngineAnalysis: EngineAnalysisResult | null,
-  player: Player | null
+  player: Player | null,
+  pvDepth: number
 ): AiLineInfo | null => {
-  if (!ctx) return null
+  if (!beforeBoard || !move || !afterBoard) return null
+
+  const firstStep = buildStepDelta(beforeBoard, move)
+  const isNonCheckMove = !firstStep.givesCheck
 
   const rawCp = afterEngineAnalysis?.evaluationCp ?? null
+  const rawMate = isNonCheckMove
+    ? null
+    : (afterEngineAnalysis?.mate ?? null)
+
   const normalizedCp =
     player !== null
       ? normalizeCpForPlayer(sanitizeCp(rawCp), player)
@@ -451,14 +465,11 @@ const buildPlayedLine = (
 
   const mate =
     player !== null
-      ? extractMateFromCp(rawCp, player)
-      : null
-
-  const firstStep = buildStepDelta(ctx.beforeBoard, ctx.move)
-  const afterBoard = moveApplier.apply(ctx.beforeBoard, ctx.move)
+      ? normalizeMateForPlayer(rawMate, player)
+      : rawMate
 
   const remainingSteps = Math.max(
-    PV_MAX_STEPS - PLAYED_FIRST_STEP_WEIGHT,
+    pvDepth - PLAYED_FIRST_STEP_WEIGHT,
     0
   )
 
@@ -467,43 +478,200 @@ const buildPlayedLine = (
     : []
 
   return {
+    rawEvaluationCp: sanitizeCp(rawCp),
     evaluationCp: normalizedCp,
     mate,
     steps: [firstStep, ...pvSteps],
   }
 }
 
+const getTacticalFeaturePriority = (feature: DetectionResult): number => {
+  switch (feature.key) {
+    case "check":
+      return 100
+    case "fork":
+      return 90
+    case "tarefu":
+      return 80
+    case "tataki":
+      return 70
+    case "block":
+      return 60
+    case "capture":
+      return 50
+    default:
+      return 10
+  }
+}
+
+const getConfidenceScore = (
+  confidence: DetectionResult["confidence"]
+): number => {
+  switch (confidence) {
+    case "high":
+      return 3
+    case "medium":
+      return 2
+    case "low":
+      return 1
+    default:
+      return 0
+  }
+}
+
+const splitTacticalFeatures = (features: DetectionResult[]): {
+  mainTacticalFeature: DetectionResult | null
+  subTacticalFeatures: DetectionResult[]
+} => {
+  if (features.length === 0) {
+    return {
+      mainTacticalFeature: null,
+      subTacticalFeatures: [],
+    }
+  }
+
+  const sorted = [...features].sort((a, b) => {
+    const priorityDiff =
+      getTacticalFeaturePriority(b) - getTacticalFeaturePriority(a)
+
+    if (priorityDiff !== 0) return priorityDiff
+
+    const confidenceDiff =
+      getConfidenceScore(b.confidence) - getConfidenceScore(a.confidence)
+
+    if (confidenceDiff !== 0) return confidenceDiff
+
+    return 0
+  })
+
+  return {
+    mainTacticalFeature: sorted[0] ?? null,
+    subTacticalFeatures: sorted.slice(1),
+  }
+}
+
+const decidePvDepth = (
+  mainFeature: DetectionResult | null
+): number => {
+  if (!mainFeature) return PV_MAX_STEPS
+
+  switch (mainFeature.key) {
+    case "tarefu":
+      return 6
+    case "tataki":
+      return 5
+    case "fork":
+      return 4
+    case "block":
+      return 4
+    case "check":
+      return 3
+    case "capture":
+      return 3
+    default:
+      return PV_MAX_STEPS
+  }
+}
+
 export const buildFullAiInput = (
   ctx: MoveAnalysisContext | null,
-  _candidates: CandidateMoveAnalysis[],
+  candidates: CandidateMoveAnalysis[],
   openingInfo: OpeningInfo,
   castleInfo: CastleInfo,
   positionFeatures: PositionFeatures,
   historicalContext: SimilarPositionResult | null = null,
   beforeEngineAnalysis: EngineAnalysisResult | null = null,
-  afterEngineAnalysis: EngineAnalysisResult | null = null
+  afterEngineAnalysis: EngineAnalysisResult | null = null,
+  threatEngineAnalysis: EngineAnalysisResult | null = null,
+  isHisshi = false
 ): FullAiInput => {
-  const player = ctx?.player ?? null
+  const beforeBoard = ctx?.beforeBoard ?? null
+  const move = ctx?.move ?? null
+  const afterBoard =
+    beforeBoard && move
+      ? moveApplier.apply(beforeBoard, move)
+      : null
+
+  const player =
+    beforeBoard?.getTurn() ??
+    ctx?.player ??
+    null
+
+  const tacticalFeatures =
+    beforeBoard && afterBoard && move && player
+      ? detectTactics({
+          before: beforeBoard,
+          after: afterBoard,
+          move,
+          player,
+        })
+      : []
+
+  const { mainTacticalFeature, subTacticalFeatures } =
+    splitTacticalFeatures(tacticalFeatures)
+
+  const pvDepth = decidePvDepth(mainTacticalFeature)
+
+  const bestLine = buildBestLine(
+    beforeBoard,
+    beforeEngineAnalysis,
+    player,
+    pvDepth
+  )
+
+  const playedLine = buildPlayedLine(
+    beforeBoard,
+    move,
+    afterBoard,
+    afterEngineAnalysis,
+    player,
+    pvDepth
+  )
+
+  const isNonCheckMove = playedLine?.steps[0]?.givesCheck === false
+
+  const normalizedThreatMate =
+    player !== null && threatEngineAnalysis
+      ? normalizeMateForPlayer(threatEngineAnalysis.mate, player)
+      : null
+
+  const threatMove =
+    threatEngineAnalysis?.bestMove && afterBoard
+      ? parseUsiToMove(threatEngineAnalysis.bestMove, afterBoard)
+      : null
+
+  const isTsumero =
+    isNonCheckMove &&
+    !isHisshi &&
+    normalizedThreatMate !== null &&
+    normalizedThreatMate > 0
+
+  const threatInfo: ThreatInfo | null =
+    isNonCheckMove && (isHisshi || isTsumero)
+      ? {
+          isTsumero,
+          isHisshi,
+          mate: isTsumero ? normalizedThreatMate : null,
+          attackMove:
+            threatMove && afterBoard
+              ? moveToJapaneseLabel(threatMove, afterBoard)
+              : null,
+        }
+      : null
 
   return {
     moveIndex: ctx?.moveIndex ?? 0,
     lineType: ctx?.lineType ?? "mainline",
 
-    playedMoveLabel: ctx ? moveToJapaneseLabel(ctx.move, ctx.beforeBoard) : null,
+    playedMoveLabel:
+      beforeBoard && move
+        ? moveToJapaneseLabel(move, beforeBoard)
+        : null,
 
-    baseBoard: ctx ? boardToAiBoardState(ctx.beforeBoard) : null,
+    baseBoard: beforeBoard ? boardToAiBoardState(beforeBoard) : null,
 
-    bestLine: buildBestLine(
-      ctx?.beforeBoard ?? null,
-      beforeEngineAnalysis,
-      player
-    ),
-
-    playedLine: buildPlayedLine(
-      ctx,
-      afterEngineAnalysis,
-      player
-    ),
+    bestLine,
+    playedLine,
 
     openingInfo,
     castleInfo,
@@ -511,9 +679,16 @@ export const buildFullAiInput = (
     historicalContext,
 
     candidates: buildCandidateSummaries(
-      _candidates,
-      ctx?.beforeBoard ?? null,
+      candidates,
+      beforeBoard,
       player
     ),
+
+    tacticalFeatures,
+    mainTacticalFeature,
+    subTacticalFeatures,
+
+    pvDisplaySteps: pvDepth,
+    threatInfo,
   }
 }

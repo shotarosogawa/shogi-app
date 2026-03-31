@@ -5,7 +5,8 @@ import type { EngineAnalysisResult } from "../core/engine/EngineAnalysisResult"
 
 const ENGINE_PATH = process.env.ENGINE_PATH!
 const MULTI_PV = 3
-const DEPTH = 10
+const DEPTH = 20
+const TIMEOUT_MS = 15000
 
 export const analyzeWithEngine = async (
   sfen: string
@@ -18,23 +19,56 @@ export const analyzeWithEngine = async (
 
     let bestMove: string | null = null
     let bestEval: number | null = null
+    let bestMate: number | null = null
     let bestPv: string[] = []
 
-    // multipv格納
     const candidatesMap = new Map<
       number,
       {
         moveText: string
         evaluationCp: number | null
+        mate: number | null
         pv: string[]
       }
     >()
 
     let state: "init" | "usi" | "ready" | "thinking" = "init"
+    let stdoutBuffer = ""
+    let settled = false
+
+    const finishResolve = (result: EngineAnalysisResult) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      resolve(result)
+    }
+
+    const finishReject = (error: Error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      reject(error)
+    }
+
+    const send = (command: string) => {
+      console.log("[engine-send]", command)
+      engine.stdin.write(command + "\n")
+    }
+
+    const timeout = setTimeout(() => {
+      try {
+        engine.kill()
+      } catch {
+        // noop
+      }
+      finishReject(new Error("engine analysis timeout"))
+    }, TIMEOUT_MS)
 
     engine.stdout.on("data", data => {
-      const text = data.toString()
-      const lines = text.split(/\r?\n/)
+      stdoutBuffer += data.toString()
+
+      const lines = stdoutBuffer.split(/\r?\n/)
+      stdoutBuffer = lines.pop() ?? ""
 
       for (const raw of lines) {
         const line = raw.trim()
@@ -47,25 +81,27 @@ export const analyzeWithEngine = async (
         // -------------------------
         if (line === "usiok" && state === "init") {
           state = "usi"
-          engine.stdin.write("isready\n")
+          send("isready")
           continue
         }
 
         if (line === "readyok" && state === "usi") {
           state = "ready"
-
-          // multipv設定
-          engine.stdin.write(`setoption name MultiPV value ${MULTI_PV}\n`)
-          engine.stdin.write("isready\n")
+          send(`setoption name MultiPV value ${MULTI_PV}`)
+          send("isready")
           continue
         }
 
         if (line === "readyok" && state === "ready") {
-          engine.stdin.write("usinewgame\n")
-          engine.stdin.write(`position sfen ${sfen}\n`)
-          engine.stdin.write(`go depth ${DEPTH}\n`)
-
+          send("usinewgame")
+          send(`position sfen ${sfen}`)
+          send(`go depth ${DEPTH}`)
           state = "thinking"
+          continue
+        }
+
+        // thinking 前の info は無視
+        if (state !== "thinking") {
           continue
         }
 
@@ -81,57 +117,60 @@ export const analyzeWithEngine = async (
           if (!multipvMatch || !pvMatch) continue
 
           const rank = Number(multipvMatch[1])
-          const pvMoves = pvMatch[1].split(" ")
+          const pvMoves = pvMatch[1].trim().split(/\s+/)
 
           let evalCp: number | null = null
+          let mate: number | null = null
 
           if (cpMatch) {
             evalCp = Number(cpMatch[1])
           } else if (mateMatch) {
-            const mate = Number(mateMatch[1])
-            evalCp = mate > 0 ? 30000 : -30000
+            mate = Number(mateMatch[1])
           }
 
-          const moveText = pvMoves[0]
+          const moveText = pvMoves[0] ?? ""
 
           candidatesMap.set(rank, {
             moveText,
             evaluationCp: evalCp,
+            mate,
             pv: pvMoves,
           })
 
-          // multipv1をbestとして扱う
           if (rank === 1) {
             bestEval = evalCp
+            bestMate = mate
             bestPv = pvMoves
           }
+
+          continue
         }
 
         // -------------------------
         // bestmove
         // -------------------------
         if (line.startsWith("bestmove")) {
-          const parts = line.split(" ")
+          const parts = line.split(/\s+/)
           bestMove = parts[1] ?? null
 
-          engine.stdin.write("quit\n")
+          send("quit")
 
-          // candidates整形
           const candidates = Array.from(candidatesMap.entries())
             .sort((a, b) => a[0] - b[0])
             .map(([_, c]) => ({
               moveText: c.moveText,
               evaluationCp: c.evaluationCp,
+              mate: c.mate,
               principalVariation: c.pv,
             }))
 
-          resolve({
+          finishResolve({
             bestMove,
             evaluationCp: bestEval,
+            mate: bestMate,
             principalVariation: bestPv,
             candidates,
           })
-
           return
         }
       }
@@ -142,12 +181,20 @@ export const analyzeWithEngine = async (
     })
 
     engine.on("error", err => {
-      reject(err)
+      finishReject(err instanceof Error ? err : new Error(String(err)))
+    })
+
+    engine.on("close", code => {
+      if (!settled) {
+        finishReject(
+          new Error(`engine process closed before bestmove. code=${code}`)
+        )
+      }
     })
 
     // -------------------------
     // スタート
     // -------------------------
-    engine.stdin.write("usi\n")
+    send("usi")
   })
 }

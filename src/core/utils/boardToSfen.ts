@@ -36,7 +36,8 @@ const pieceToSfen = (type: PieceType, owner: Player): string => {
 const handToSfen = (pieces: PieceType[]): string => {
   if (pieces.length === 0) return ""
 
-  const order: PieceType[] = ["FU", "KY", "KE", "GI", "KI", "KA", "HI"]
+  // SFENの持ち駒順: R B G S N L P
+  const order: PieceType[] = ["HI", "KA", "KI", "GI", "KE", "KY", "FU"]
 
   const countMap: Record<string, number> = {}
 
@@ -51,7 +52,6 @@ const handToSfen = (pieces: PieceType[]): string => {
     if (!count) continue
 
     const sfenChar = pieceToSfen(type, "black") // handは大文字
-
     result += count > 1 ? `${count}${sfenChar}` : sfenChar
   }
 

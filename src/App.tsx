@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import "./App.css"
+import { DebugPanel } from "./components/DebugPanel"
 import { EngineCandidatesPanel } from "./components/EngineCandidatesPanel"
 import { GameResultModal } from "./components/GameResultModal"
 import { HistoryPanel } from "./components/HistoryPanel"
@@ -109,6 +110,8 @@ function App() {
   const [engineAnalysis, setEngineAnalysis] = useState<EngineAnalysisResult | null>(null)
 
   const [isEngineLoading, setIsEngineLoading] = useState(false)
+
+  const [showDebug, setShowDebug] = useState(true)
 
   const currentTurn = board.getTurn()
 
@@ -612,6 +615,31 @@ function App() {
       const postMoveEngineAnalysis = postMoveBoard
         ? await fetchEngineAnalysis(postMoveBoard)
         : null
+      
+      const playedMove =
+        targetMoveAnalysisContext?.move ?? null
+
+      const playedBy =
+        targetMoveAnalysisContext?.player ?? null
+
+      const givesCheck =
+        preMoveBoard && playedMove
+          ? isMoveGivesCheck(preMoveBoard, playedMove)
+          : false
+
+      const isHisshi =
+        !givesCheck &&
+        postMoveEngineAnalysis?.mate != null &&
+        postMoveEngineAnalysis.mate < 0
+      
+      let threatEngineAnalysis: EngineAnalysisResult | null = null
+
+      if (!givesCheck && !isHisshi && postMoveBoard && playedBy) {
+        const attackerTurnBoard = postMoveBoard.clone()
+        attackerTurnBoard.setTurn(playedBy)
+
+        threatEngineAnalysis = await fetchEngineAnalysis(attackerTurnBoard)
+      }
 
       const promptInput = buildFullAiInput(
         targetMoveAnalysisContext,
@@ -621,7 +649,9 @@ function App() {
         positionFeatures,
         historicalContext,
         preMoveEngineAnalysis,
-        postMoveEngineAnalysis
+        postMoveEngineAnalysis,
+        threatEngineAnalysis,       // threatEngineAnalysis は今は使わない
+        isHisshi
       )
 
       const prompt = buildAnalysisPrompt(
@@ -782,6 +812,19 @@ function App() {
     engineCacheRef.current.set(sfen, data)
 
     return data
+  }
+
+  const isMoveGivesCheck = (beforeBoard: Board, move: Move): boolean => {
+    const nextBoard = moveApplier.apply(beforeBoard, move)
+    return attackDetector.isKingInCheck(nextBoard, nextBoard.getTurn())
+  }
+
+  const normalizeMateForPlayer = (
+    mate: number | null,
+    player: "black" | "white"
+  ): number | null => {
+    if (mate === null) return null
+    return player === "black" ? mate : -mate
   }
 
   useEffect(() => {
@@ -1302,6 +1345,11 @@ function App() {
             )}
           </div>
         </div>
+        <button onClick={() => setShowDebug(v => !v)}>
+          Debug
+        </button>
+
+        {showDebug && <DebugPanel input={fullAiInput} />}
       </div>
 
       <GameResultModal
